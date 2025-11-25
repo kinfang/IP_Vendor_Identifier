@@ -1,0 +1,251 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <title>IP 厂商识别工具</title>
+    <style>
+        body { font-family: Arial, sans-serif; margin: 20px; background-color: #f4f4f9; }
+        .container { max-width: 1200px; margin: auto; padding: 20px; background: #fff; border-radius: 8px; box-shadow: 0 4px 8px rgba(0,0,0,0.1); }
+        h1 { color: #007bff; border-bottom: 2px solid #eee; padding-bottom: 10px; }
+        h2 { color: #333; margin-top: 25px; }
+        label { display: block; margin-top: 15px; font-weight: bold; }
+        textarea, input[type="text"], select { width: 100%; padding: 10px; margin-top: 5px; border: 1px solid #ccc; border-radius: 4px; box-sizing: border-box; resize: vertical; }
+        textarea { height: 120px; }
+        button { background-color: #28a745; color: white; padding: 12px 20px; border: none; border-radius: 4px; cursor: pointer; margin-top: 20px; font-size: 16px; transition: background-color 0.3s; }
+        button:hover { background-color: #218838; }
+        #results { margin-top: 30px; }
+        #results table { width: 100%; border-collapse: collapse; margin-top: 15px;}
+        #results th, #results td { padding: 10px; text-align: left; border: 1px solid #ddd; font-size: 14px; }
+        #results th { background-color: #007bff; color: white; }
+        .status-NXDOMAIN, .status-TIMEOUT, .status-ERROR { color: red; font-weight: bold; }
+        .status-OK { color: green; font-weight: bold; }
+        .loading { text-align: center; margin-top: 20px; font-size: 1.1em; color: #555; }
+        .add-vendor-btn { background-color: #ffc107; color: black; border: 1px solid #c09b06; margin-top: 5px;}
+        .add-vendor-btn:hover { background-color: #e0a800; }
+        #filterControls { background-color: #f9f9f9; padding: 15px; border-radius: 6px; border: 1px solid #eee; }
+        .nav-link { margin-left: 15px; color: #007bff; text-decoration: none; font-weight: bold;}
+        .status-message { margin-top: 15px; font-weight: bold; } /* 新增的样式 */
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div style="float: right; margin-top: -50px;">
+            <p>
+                当前用户: <strong>{{ current_user.id }}</strong>
+                <a href="{{ url_for('vendor_manage_page') }}" class="nav-link">[厂商管理]</a> 
+                <a href="{{ url_for('logout') }}" style="color: red; margin-left: 15px;">[登出]</a>
+            </p>
+        </div>
+        
+        <h1>🌎 IP 厂商识别工具</h1>
+        <div style="clear: both;"></div>
+
+        <h2>查询配置</h2>
+        <form id="queryForm">
+            <div style="display: flex; gap: 20px;">
+                <div style="flex: 1;">
+                    <label for="dnsServers">自定义 DNS 服务器 IP (每行一个):</label>
+                    <textarea id="dnsServers" rows="4"></textarea> 
+                </div>
+                <div style="flex: 1;">
+                    <label for="domains">域名列表 (每行一个):</label>
+                    <textarea id="domains" rows="4" placeholder="例如：&#10;example.com&#10;www.google.com"></textarea>
+                </div>
+            </div>
+            <button type="submit" id="queryButton">执行实时查询</button>
+            <div id="queryStatusMessage" class="status-message"></div>
+        </form>
+
+        <hr style="margin: 30px 0;">
+        <h2>🔍 筛选结果</h2>
+        <div id="filterControls" style="display: flex; gap: 20px; margin-bottom: 20px;">
+            <div style="flex: 1;">
+                <label for="filterDomain">筛选域名:</label>
+                <input type="text" id="filterDomain" placeholder="输入域名关键词">
+            </div>
+            <div style="flex: 1;">
+                <label for="filterVendor">筛选厂商:</label>
+                <input type="text" id="filterVendor" placeholder="输入厂商关键词">
+            </div>
+            <div style="flex: 1;">
+                <label for="filterStatus">筛选状态:</label>
+                <select id="filterStatus">
+                    <option value="">-- 显示全部 --</option>
+                    <option value="OK">解析成功 (OK)</option>
+                    <option value="NXDOMAIN">域名不存在 (NXDOMAIN)</option>
+                    <option value="TIMEOUT">超时 (TIMEOUT)</option>
+                    <option value="ERROR">查询错误 (ERROR)</option>
+                </select>
+            </div>
+        </div>
+
+        <div id="loading" class="loading" style="display: none;">正在查询，请稍候...</div>
+        <div id="results">
+            </div>
+    </div>
+
+    <script>
+        let LAST_QUERY_RESULTS = [];
+        const DNS_SERVERS_KEY = 'lastUsedDnsServers';
+
+        document.addEventListener('DOMContentLoaded', () => {
+            const savedServers = localStorage.getItem(DNS_SERVERS_KEY);
+            const dnsServersInput = document.getElementById('dnsServers');
+            
+            if (savedServers) {
+                dnsServersInput.value = savedServers;
+            } else {
+                dnsServersInput.value = '8.8.8.8'; 
+            }
+        });
+
+
+        // --- 通用 Fetch 函数 (现在可以接受 'queryStatusMessage' 或 'vendorStatusMessage') ---
+        function submitForm(endpoint, payload, buttonId, statusDivId, successCallback) {
+            const button = document.getElementById(buttonId);
+            const statusDiv = document.getElementById(statusDivId);
+
+            // 关键修复：确保 statusDiv 存在
+            if (!statusDiv) {
+                console.error(`Status Div with ID ${statusDivId} not found!`);
+                button.disabled = false;
+                button.innerText = (buttonId === 'queryButton') ? '执行实时查询' : '操作';
+                return; // 提前退出，防止运行时错误
+            }
+
+            statusDiv.innerHTML = '';
+            button.disabled = true;
+            button.innerText = '处理中...';
+
+            fetch(endpoint, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(payload)
+            })
+            .then(response => response.json())
+            .then(data => {
+                button.disabled = false;
+                button.innerText = (buttonId === 'queryButton') ? '执行实时查询' : '添加厂商 IP';
+
+                if (data.status === 'success') {
+                    statusDiv.innerText = data.message || '操作成功。';
+                    statusDiv.style.color = 'green';
+                    if (successCallback) successCallback(data);
+                } else {
+                    statusDiv.innerText = `操作失败: ${data.message || '未知错误'}`;
+                    statusDiv.style.color = 'red';
+                }
+            })
+            .catch(error => {
+                button.disabled = false;
+                button.innerText = (buttonId === 'queryButton') ? '执行实时查询' : '添加厂商 IP';
+                statusDiv.innerText = `网络或服务器连接失败: ${error}`;
+                statusDiv.style.color = 'red';
+            });
+        }
+
+
+        // --- 核心筛选逻辑 (保持不变) ---
+        function applyFilters() {
+            const resultsDiv = document.getElementById('results');
+            const filterDomain = document.getElementById('filterDomain').value.toLowerCase();
+            const filterVendor = document.getElementById('filterVendor').value.toLowerCase();
+            const filterStatus = document.getElementById('filterStatus').value.toUpperCase();
+
+            if (LAST_QUERY_RESULTS.length === 0) {
+                resultsDiv.innerHTML = "<p>请先执行查询。</p>";
+                return;
+            }
+
+            const filteredResults = LAST_QUERY_RESULTS.filter(record => {
+                const domainMatch = record.domain.toLowerCase().includes(filterDomain);
+                const vendorMatch = (record.vendor || '').toLowerCase().includes(filterVendor);
+                
+                let statusText = record.status.split(':')[0].toUpperCase();
+                if (!['OK', 'NXDOMAIN', 'TIMEOUT'].includes(statusText)) {
+                     statusText = 'ERROR'; 
+                }
+                const statusMatch = !filterStatus || statusText === filterStatus;
+                
+                return domainMatch && vendorMatch && statusMatch;
+            });
+
+            renderTable(filteredResults);
+        }
+
+        // 独立的表格渲染函数 (保持不变)
+        function renderTable(results) {
+            const resultsDiv = document.getElementById('results');
+            
+            const oldTable = document.getElementById('resultsTable');
+            if (oldTable) oldTable.remove();
+
+            if (results.length === 0) {
+                resultsDiv.innerHTML += "<p>没有匹配的记录。</p>";
+                return;
+            }
+
+            let html = `<table id="resultsTable">
+                            <thead>
+                                <tr>
+                                    <th>域名</th>
+                                    <th>状态/类型</th>
+                                    <th>记录值/错误信息</th>
+                                    <th>对应厂商</th>
+                                
+                                </tr>
+                            </thead>
+                            <tbody>`;
+            
+            results.forEach(record => {
+                const statusClass = `status-${record.status.split(':')[0].toUpperCase()}`;
+                
+                html += `
+                    <tr>
+                        <td>${record.domain}</td>
+                        <td class="${statusClass}">${record.type} (${record.status})</td>
+                        <td>${record.value}</td>
+                        <td>${record.vendor || 'N/A'}</td>
+                    </tr>
+                `;
+            });
+            
+            html += `</tbody></table>`;
+            resultsDiv.innerHTML += html;
+        }
+        
+        // --- 1. 实时查询逻辑 (关键修复点：替换 statusDivId) ---
+        document.getElementById('queryForm').addEventListener('submit', function(e) {
+            e.preventDefault();
+            
+            const domains = document.getElementById('domains').value;
+            const dnsServersInput = document.getElementById('dnsServers');
+            const dnsServers = dnsServersInput.value;
+            const loadingDiv = document.getElementById('loading');
+            
+            localStorage.setItem(DNS_SERVERS_KEY, dnsServers);
+            
+            loadingDiv.style.display = 'block';
+            document.getElementById('results').innerHTML = '';
+
+            const payload = { domains: domains, dns_servers: dnsServers };
+
+            // **修复点**：将 'vendorStatusMessage' 替换为 'queryStatusMessage'
+            submitForm('/query', payload, 'queryButton', 'queryStatusMessage', (data) => {
+                loadingDiv.style.display = 'none';
+                
+                LAST_QUERY_RESULTS = data.results; 
+                document.getElementById('results').innerHTML = `<h2>查询结果 (${data.results.length} 条记录)</h2>
+                                                               <p>总耗时: ${data.time_taken}</p>`;
+                applyFilters(); 
+            });
+        });
+
+
+        // --- 筛选器事件绑定 (保持不变) ---
+        document.getElementById('filterDomain').addEventListener('input', applyFilters);
+        document.getElementById('filterVendor').addEventListener('input', applyFilters);
+        document.getElementById('filterStatus').addEventListener('change', applyFilters);
+    </script>
+</body>
+</html>

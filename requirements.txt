@@ -1,0 +1,6 @@
+Flask
+mysql-connector-python
+dnspython
+Werkzeug
+Flask-Login
+gunicorn

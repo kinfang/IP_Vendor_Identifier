@@ -1,0 +1,45 @@
+version: '3.8'
+
+services:
+  # --- 1. 应用服务 (Flask/Gunicorn) ---
+  app:
+    build: . 
+    container_name: ip_vendor_app
+    restart: always
+    ports:
+      - "55556:5000"
+    # 仅使用 env_file 加载所有变量，删除空的 environment 块
+    env_file:
+      - .env
+      
+    depends_on:
+      db:
+        condition: service_healthy # 🚨 更改依赖条件
+    command: >
+      gunicorn -w 4 -b 0.0.0.0:5000 realtime_dns_checker:APP
+      
+  # --- 2. 数据库服务 (MySQL) ---
+  db:
+    image: mysql:8.0
+    container_name: ip_vendor_db
+    restart: always
+    env_file:
+      - .env
+    environment:
+      # 仅保留 MYSQL_DATABASE，因为它没有在应用代码中被引用，但必须设置
+      MYSQL_DATABASE: ip_vendor_db
+    # 🚨 新增 healthcheck 确保 DB 容器完全准备好
+    healthcheck:
+          test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "root", "-p${DB_ROOT_PASSWORD}"]
+          interval: 5s
+          timeout: 5s
+          retries: 5
+      
+    # 数据持久化和初始化
+    volumes:
+      - db_data:/var/lib/mysql
+      - ./init.sql:/docker-entrypoint-initdb.d/init.sql 
+
+# Docker 卷定义
+volumes:
+  db_data:
