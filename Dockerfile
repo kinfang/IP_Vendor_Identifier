@@ -5,19 +5,18 @@ FROM centos:8
 ENV PYTHONUNBUFFERED 1
 ENV APP_PORT 5000
 
-# ⚠️ 修复 CentOS 8 EOL 错误，并安装 curl (如果未预装)
-# 1. 安装 curl 和基础工具 (如果需要)
+# 1. ⚠️ 第一步：使用 sed 替换配置文件，强制指向 Vault 归档源
+#    注意：此步骤不依赖网络连接和 curl，因此应该能成功执行
+RUN sed -i 's/mirrorlist/#mirrorlist/g' /etc/yum.repos.d/CentOS-* && \
+    sed -i 's|#baseurl=http://mirror.centos.org|baseurl=http://vault.centos.org|g' /etc/yum.repos.d/CentOS-* && \
+    yum clean all
+
+# 2. 第二步：现在源已修复，执行更新和安装 curl
 RUN yum update -y && \
     yum install -y curl && \
     yum clean all
 
-# 2. 替换为阿里云的 Vault 归档源配置文件
-#    使用 Centos-vault-8.5.2111.repo 解决 EOL 问题
-RUN mv /etc/yum.repos.d/CentOS-Base.repo /etc/yum.repos.d/CentOS-Base.repo.backup && \
-    curl -o /etc/yum.repos.d/CentOS-Base.repo http://mirrors.aliyun.com/repo/Centos-vault-8.5.2111.repo && \
-    yum clean all && yum makecache
-
-# [3/8] 现在执行软件包安装
+# 3. 第三步：安装应用所需的其他依赖
 RUN yum install -y python3 python3-pip && \
     yum groupinstall -y 'Development Tools' && \
     yum install -y mysql-devel && \
