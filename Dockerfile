@@ -1,5 +1,5 @@
 # Use a slim Python image for a smaller final size
-FROM python:3.11-slim-centos
+FROM centos:8
 
 # Set environment variables
 ENV PYTHONUNBUFFERED 1
