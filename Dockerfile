@@ -1,15 +1,18 @@
 # Use a slim Python image for a smaller final size
-FROM python:3.11-slim
+FROM python:3.11-slim-centos
 
 # Set environment variables
 ENV PYTHONUNBUFFERED 1
 ENV APP_PORT 5000
 
 # Install necessary system libraries for robust database connection
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    build-essential \
-    default-libmysqlclient-dev \
-    && rm -rf /var/lib/apt/lists/*
+# 替换 apt-get 为 dnf/yum
+# 安装 build-essential 的替代品（Development Tools）和 MySQL 开发库
+RUN dnf update -y && \
+    dnf install -y python3-devel gcc && \
+    dnf install -y mysql-devel && \
+    dnf group install -y "Development Tools" && \
+    dnf clean all
 
 # Create working directory
 WORKDIR /app
