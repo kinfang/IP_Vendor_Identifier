@@ -11,18 +11,12 @@ import sys
 from functools import wraps
 
 # ====================================================================
-#                    !!! 安全配置区 !!!
+#                   !!! 安全配置区 !!!
 # ====================================================================
 
 # 从环境变量加载敏感配置 (默认值设置为None或空字符串，强制通过环境变量设置)
 ADMIN_PASSWORD_HASH = os.environ.get('ADMIN_PASSWORD_HASH', '') 
 ADMIN_USERNAME = os.environ.get('ADMIN_USERNAME', 'admin') 
-
-# if ADMIN_PASSWORD_HASH:
-#     print(f"!!! CHECK HASH !!! FULL ADMIN_PASSWORD_HASH: '{ADMIN_PASSWORD_HASH}' (Length: {len(ADMIN_PASSWORD_HASH)})", file=sys.stderr)
-# else:
-#     print("!!! CHECK HASH !!! ADMIN_PASSWORD_HASH is EMPTY! Login will fail.", file=sys.stderr)
-
 
 # Flask 密钥
 APP = Flask(__name__)
@@ -43,7 +37,7 @@ CIDR_MAP_LOADED = False # 🚨 新增：用于跟踪 CIDR 映射是否已成功�
 
 
 # ====================================================================
-#                     Flask-Login 配置
+#                   Flask-Login 配置
 # ====================================================================
 
 login_manager = LoginManager()
@@ -81,19 +75,25 @@ def load_cidr_map_from_db():
    
    global IP_VENDOR_MAP_CACHE
    cursor = conn.cursor()
-   sql = "SELECT cidr_range, vendor_name FROM ip_vendor_map"
+   # 数据库中包含 description，但缓存中我们仅存储 network object 和 vendor_name 以简化查找
+   sql = "SELECT cidr_range, vendor_name FROM ip_vendor_map" 
    
    success = False
    try:
       cursor.execute(sql)
       rows = cursor.fetchall()
       IP_VENDOR_MAP_CACHE = []
+      
+      # 修复点 1: 将 strict=True 改为 strict=False
+      # 允许 ipaddress 自动纠正非标准网络地址，防止数据被静默跳过
       for cidr_str, vendor_name in rows:
          try:
-            network = ipaddress.ip_network(cidr_str, strict=True)
+            network = ipaddress.ip_network(cidr_str, strict=False) 
             IP_VENDOR_MAP_CACHE.append((network, vendor_name))
          except ValueError:
+            print(f"❌ 警告: 跳过数据库中无效的 CIDR 字符串: {cidr_str}", file=sys.stderr)
             pass 
+            
       print(f"✅ 厂商映射加载成功，共 {len(IP_VENDOR_MAP_CACHE)} 条记录。", file=sys.stderr)
       success = True
    except Exception as e:
@@ -105,10 +105,15 @@ def load_cidr_map_from_db():
 
 def lookup_vendor(ip_address_str):
    try:
-      ip_obj = ipaddress.ip_address(ip_address_str)
+      # 将输入 IP 地址转换为 IP 地址对象
+      ip_obj = ipaddress.ip_address(ip_address_str) 
+      
+      # 遍历内存缓存，进行包含性检查
       for network, vendor_name in IP_VENDOR_MAP_CACHE:
+         # 核心查找逻辑：检查 IP 对象是否在 network 范围内
          if ip_obj in network:
             return vendor_name
+            
       return "未知/未匹配"
    except ValueError:
       return "IP格式错误"
@@ -144,10 +149,9 @@ def resolve_domain_with_custom_dns(domain, custom_servers):
    return results
 
 # ====================================================================
-#                     认证和视图路由
+#                   认证和视图路由
 # ====================================================================
 
-# 💡 替代方法：使用 @APP.before_request 并在函数内部控制只运行一次
 @APP.before_request
 def initial_setup():
     global CIDR_MAP_LOADED
@@ -302,8 +306,11 @@ def add_vendor():
 
    if not vendor_name or not cidr_range:
       return jsonify({'status': 'error', 'message': '厂商名称和 CIDR 范围不能为空。'}), 400
+      
    try:
-      ipaddress.ip_network(cidr_range, strict=True)
+      # 修复点 2: 将 strict=True 改为 strict=False
+      # 允许用户输入非标准网络地址，并在内部将其视为标准网络地址
+      ipaddress.ip_network(cidr_range, strict=False) 
    except ValueError:
       return jsonify({'status': 'error', 'message': 'CIDR 范围格式无效，请检查。'}), 400
 
@@ -330,6 +337,3 @@ def add_vendor():
    finally:
       cursor.close()
       conn.close()
-
-
-# 🚨 确保文件底部没有其他数据库相关的调用！
