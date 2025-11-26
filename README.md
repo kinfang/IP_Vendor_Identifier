@@ -1,4 +1,4 @@
-# 🔍 IP Vendor Identifier (IP 厂商识别工具)
+## 📄 README.md: IP Vendor Identifier (IP 厂商识别工具)
 
 这是一个基于 Python Flask/Gunicorn 的 Web 应用，专注于**查询域名解析的 IP 地址并识别其所属的厂商或服务提供商**。该工具允许用户指定 DNS 服务器进行查询，并将解析到的 IP 地址与内部数据库中的厂商 IP 范围进行比对，以实现快速的 IP 归属识别。该项目使用 Docker Compose 进行容器化部署。
 
@@ -12,9 +12,13 @@
 
 ## 🛠️ 技术栈
 
-  * **后端:** Python 3.11, Flask, Gunicorn, Werkzeug
-  * **数据库:** MySQL
-  * **容器化:** Docker, Docker Compose
+| 组件 | 最终使用的稳定版本/配置 | 备注 |
+| :--- | :--- | :--- |
+| **后端** | Python 3.11, Flask, Gunicorn | 应用代码语言环境。 |
+| **应用基础镜像** | `python:3.11-alpine` | 解决了系统依赖安装的网络和权限兼容性问题。 |
+| **数据库** | MariaDB 10.11 | **稳定选择**：解决了 MySQL 8.0/5.7 在 CentOS 8 宿主机上的启动兼容性问题。 |
+| **数据库镜像** | `yobasystems/alpine-mariadb:10.11.10-x86_64` | **关键:** 这是一个经过验证的、能在旧内核上稳定运行的 MariaDB 镜像。 |
+| **容器化** | Docker, Docker Compose | |
 
 ## 🚀 部署指南
 
@@ -64,24 +68,35 @@ cd IP_Vendor_Identifier
     # --- 2. 数据库连接配置 (供应用和db服务使用) ---
     DB_HOST=db
     DB_PORT=3306
-    DB_USER=dns_checker_user
+    DB_USER=ip_vendor_user
     DB_PASSWORD=YOUR_APP_DB_PASSWORD
-    DB_NAME=dns_checker_db
+    DB_NAME=ip_vendor_db
 
-    # --- 3. MySQL 服务初始化配置 ---
+    # --- 3. MariaDB 服务初始化配置 ---
+    # MySQL Root 密码 (用于数据库初始化和管理)
     MYSQL_ROOT_PASSWORD=YOUR_ROOT_PASSWORD 
-    MYSQL_USER=dns_checker_user      # 必须与 DB_USER 匹配
+    MYSQL_USER=ip_vendor_user      # 必须与 DB_USER 匹配
     MYSQL_PASSWORD=YOUR_APP_DB_PASSWORD # 必须与 DB_PASSWORD 匹配
-    MYSQL_DATABASE=dns_checker_db    # 必须与 DB_NAME 匹配
+    MYSQL_DATABASE=ip_vendor_db    # 必须与 DB_NAME 匹配
     ```
 
 ### 4\. 启动服务
 
-使用 Docker Compose 构建并以后台模式启动所有服务：
+**重要说明：** 由于项目在 CentOS 环境下存在兼容性问题，首次构建时必须分两步执行，以避免缓存和命令语法错误。
 
-```bash
-docker-compose up --build -d
-```
+1.  **构建应用镜像（强制无缓存）：**
+    此步骤使用 `python:3.11-alpine` 构建，并安装 `mariadb-dev` 依赖。
+
+    ```bash
+    docker-compose build --no-cache
+    ```
+
+2.  **启动所有服务：**
+    此步骤会拉取并启动 MariaDB 容器，然后启动应用容器。
+
+    ```bash
+    docker-compose up -d
+    ```
 
 ### 5\. 访问应用
 
@@ -121,6 +136,4 @@ docker-compose down -v
 
 > **关于数据持久性:** 数据库数据存储在 Docker 自动管理的命名卷 (`db_data`) 中，位于您的宿主机上。运行 `docker-compose down -v` 会删除此卷，导致数据丢失。
 
-
-```
-```
+-----
