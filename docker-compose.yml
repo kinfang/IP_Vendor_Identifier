@@ -20,14 +20,15 @@ services:
       
   # --- 2. 数据库服务 (MySQL) ---
   db:
-    image: mysql:8.0
-    container_name: ip_vendor_db
+    # 切换到 MariaDB 的 Alpine 版本，以提高兼容性
+    image: yobasystems/alpine-mariadb:10.11.10-x86_64
+    container_name: ip_vendor_identifier_db
     restart: always
     env_file:
       - .env
     environment:
       # 仅保留 MYSQL_DATABASE，因为它没有在应用代码中被引用，但必须设置
-      MYSQL_DATABASE: ip_vendor_db
+      MYSQL_DATABASE: ${DB_NAME}
     # 🚨 新增 healthcheck 确保 DB 容器完全准备好
     healthcheck:
           test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "root", "-p${MYSQL_ROOT_PASSWORD}"]
