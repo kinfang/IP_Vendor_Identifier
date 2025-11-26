@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-from flask import Flask, request, jsonify, render_template, redirect, url_for, flash
+from flask import Flask, request, jsonify, render_template, redirect, url_for, flash, make_response
 import mysql.connector
 import dns.resolver
 import ipaddress
@@ -9,6 +9,8 @@ from werkzeug.security import check_password_hash
 import os
 import sys
 from functools import wraps
+import csv
+from io import StringIO # 用于在内存中创建 CSV 文件
 
 # ====================================================================
 #                   !!! 安全配置区 !!!
@@ -295,6 +297,46 @@ def handle_query():
    })
 
 
+@APP.route('/export_query', methods=['POST'])
+@login_required
+def export_query_results():
+    """接收查询结果的 JSON 数据，并将其转换为 CSV 文件进行下载。"""
+    try:
+        # 获取前端发送的 JSON 数据
+        data = request.json
+        results = data.get('results', [])
+        
+        if not results:
+            return jsonify({'status': 'error', 'message': '没有查询结果可以导出。'}), 400
+
+        # 定义 CSV 头部和字段
+        fieldnames = ['domain', 'type', 'value', 'vendor', 'status']
+        
+        # 使用 StringIO 在内存中构建 CSV 文件
+        output = StringIO()
+        writer = csv.DictWriter(output, fieldnames=fieldnames)
+        
+        # 写入头部
+        writer.writeheader()
+        
+        # 写入数据行
+        writer.writerows(results)
+        
+        csv_output = output.getvalue()
+        
+        # 创建 Flask 响应对象，设置 MIME 类型和文件名
+        response = make_response(csv_output)
+        response.headers["Content-Disposition"] = "attachment; filename=dns_query_results.csv"
+        # 设置正确的 CSV MIME 类型，并指定 UTF-8 编码以支持中文
+        response.headers["Content-type"] = "text/csv; charset=utf-8"
+        
+        return response
+        
+    except Exception as e:
+        print(f"❌ 导出查询结果失败: {e}", file=sys.stderr)
+        return jsonify({'status': 'error', 'message': f'导出过程中发生错误: {e}'}), 500
+
+
 @APP.route('/add_vendor', methods=['POST'])
 @login_required 
 def add_vendor():
@@ -337,3 +379,6 @@ def add_vendor():
    finally:
       cursor.close()
       conn.close()
+
+
+# 🚨 确保文件底部没有其他数据库相关的调用！

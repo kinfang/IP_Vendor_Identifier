@@ -11,8 +11,25 @@
         label { display: block; margin-top: 15px; font-weight: bold; }
         textarea, input[type="text"], select { width: 100%; padding: 10px; margin-top: 5px; border: 1px solid #ccc; border-radius: 4px; box-sizing: border-box; resize: vertical; }
         textarea { height: 120px; }
+        
+        /* 通用按钮样式 - 仅应用于表单按钮，不影响导出按钮 */
         button { background-color: #28a745; color: white; padding: 12px 20px; border: none; border-radius: 4px; cursor: pointer; margin-top: 20px; font-size: 16px; transition: background-color 0.3s; }
         button:hover { background-color: #218838; }
+        
+        /* --- 导出按钮的专用样式 --- */
+        #exportButton { 
+            background-color: #17a2b8; 
+            color: white; 
+            /* 覆盖通用的 margin-top: 20px; 并增加底部间距 */
+            margin-top: 10px; 
+            margin-bottom: 20px; 
+            padding: 8px 15px; 
+            font-size: 14px; 
+            width: auto; /* 确保它不会占据 100% 宽度 */
+        }
+        #exportButton:hover:not(:disabled) { background-color: #117a8b; }
+        #exportButton:disabled { background-color: #ccc; cursor: not-allowed; }
+
         #results { margin-top: 30px; }
         #results table { width: 100%; border-collapse: collapse; margin-top: 15px;}
         #results th, #results td { padding: 10px; text-align: left; border: 1px solid #ddd; font-size: 14px; }
@@ -24,7 +41,7 @@
         .add-vendor-btn:hover { background-color: #e0a800; }
         #filterControls { background-color: #f9f9f9; padding: 15px; border-radius: 6px; border: 1px solid #eee; }
         .nav-link { margin-left: 15px; color: #007bff; text-decoration: none; font-weight: bold;}
-        .status-message { margin-top: 15px; font-weight: bold; } /* 新增的样式 */
+        .status-message { margin-top: 15px; font-weight: bold; } 
     </style>
 </head>
 <body>
@@ -58,6 +75,9 @@
 
         <hr style="margin: 30px 0;">
         <h2>🔍 筛选结果</h2>
+        
+        <button id="exportButton" disabled>导出当前筛选结果 (CSV)</button>
+        
         <div id="filterControls" style="display: flex; gap: 20px; margin-bottom: 20px;">
             <div style="flex: 1;">
                 <label for="filterDomain">筛选域名:</label>
@@ -97,20 +117,70 @@
             } else {
                 dnsServersInput.value = '8.8.8.8'; 
             }
+            
+            // 绑定导出按钮事件
+            document.getElementById('exportButton').addEventListener('click', exportResults);
         });
+        
+        // --- 导出功能的核心逻辑 ---
+        function exportResults() {
+            const resultsToExport = getFilteredResults(); // 获取当前筛选后的结果
+            const exportButton = document.getElementById('exportButton');
+            exportButton.disabled = true;
+            const originalText = exportButton.innerText;
+            exportButton.innerText = '正在生成...';
+
+            // 发送 POST 请求到新的导出 API
+            fetch("{{ url_for('export_query_results') }}", {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ results: resultsToExport })
+            })
+            .then(response => {
+                if (response.ok && response.headers.get('content-type').includes('text/csv')) {
+                    return response.blob();
+                } else {
+                    return response.json().then(data => {
+                        throw new Error(data.message || '导出失败，请检查服务器日志。');
+                    });
+                }
+            })
+            .then(blob => {
+                if (blob instanceof Blob) {
+                    const url = window.URL.createObjectURL(blob);
+                    const a = document.createElement('a');
+                    a.style.display = 'none';
+                    a.href = url;
+                    const filename = 'dns_query_results.csv';
+                    a.download = filename;
+                    document.body.appendChild(a);
+                    a.click();
+                    window.URL.revokeObjectURL(url);
+                }
+                
+                exportButton.innerText = originalText;
+                exportButton.disabled = false;
+                
+            })
+            .catch(error => {
+                alert(`导出失败: ${error.message}`);
+                exportButton.innerText = originalText;
+                exportButton.disabled = false;
+            });
+        }
+        // --- 结束: 导出功能的核心逻辑 ---
 
 
-        // --- 通用 Fetch 函数 (现在可以接受 'queryStatusMessage' 或 'vendorStatusMessage') ---
+        // --- 通用 Fetch 函数 ---
         function submitForm(endpoint, payload, buttonId, statusDivId, successCallback) {
             const button = document.getElementById(buttonId);
             const statusDiv = document.getElementById(statusDivId);
 
-            // 关键修复：确保 statusDiv 存在
             if (!statusDiv) {
                 console.error(`Status Div with ID ${statusDivId} not found!`);
                 button.disabled = false;
                 button.innerText = (buttonId === 'queryButton') ? '执行实时查询' : '操作';
-                return; // 提前退出，防止运行时错误
+                return;
             }
 
             statusDiv.innerHTML = '';
@@ -144,20 +214,13 @@
             });
         }
 
-
-        // --- 核心筛选逻辑 (保持不变) ---
-        function applyFilters() {
-            const resultsDiv = document.getElementById('results');
+        // --- 辅助函数：获取当前筛选结果 ---
+        function getFilteredResults() {
             const filterDomain = document.getElementById('filterDomain').value.toLowerCase();
             const filterVendor = document.getElementById('filterVendor').value.toLowerCase();
             const filterStatus = document.getElementById('filterStatus').value.toUpperCase();
 
-            if (LAST_QUERY_RESULTS.length === 0) {
-                resultsDiv.innerHTML = "<p>请先执行查询。</p>";
-                return;
-            }
-
-            const filteredResults = LAST_QUERY_RESULTS.filter(record => {
+            return LAST_QUERY_RESULTS.filter(record => {
                 const domainMatch = record.domain.toLowerCase().includes(filterDomain);
                 const vendorMatch = (record.vendor || '').toLowerCase().includes(filterVendor);
                 
@@ -169,20 +232,53 @@
                 
                 return domainMatch && vendorMatch && statusMatch;
             });
+        }
+
+
+        // --- 核心筛选逻辑 (修复渲染逻辑) ---
+        function applyFilters() {
+            const resultsDiv = document.getElementById('results');
+            const filteredResults = getFilteredResults();
+            const exportButton = document.getElementById('exportButton');
+
+            if (LAST_QUERY_RESULTS.length === 0) {
+                resultsDiv.innerHTML = "<p>请先执行查询。</p>";
+                exportButton.disabled = true;
+                return;
+            }
+            
+            exportButton.disabled = filteredResults.length === 0;
+
+            const oldTable = document.getElementById('resultsTable');
+            const noMatchP = document.getElementById('no-match-message');
+
+            if (filteredResults.length === 0) {
+                 if (oldTable) oldTable.remove(); // 移除旧表格
+                 
+                 // 如果没有“没有匹配”的消息，则添加它
+                 if (!noMatchP) {
+                    const p = document.createElement('p');
+                    p.id = 'no-match-message';
+                    p.innerText = "没有匹配的记录。";
+                    resultsDiv.appendChild(p);
+                 }
+                 return;
+            }
+            
+            // 如果有匹配结果，移除“没有匹配的记录”消息
+            if (noMatchP) noMatchP.remove();
 
             renderTable(filteredResults);
         }
 
-        // 独立的表格渲染函数 (保持不变)
+        // 独立的表格渲染函数
         function renderTable(results) {
             const resultsDiv = document.getElementById('results');
-            
             const oldTable = document.getElementById('resultsTable');
             if (oldTable) oldTable.remove();
 
             if (results.length === 0) {
-                resultsDiv.innerHTML += "<p>没有匹配的记录。</p>";
-                return;
+                return; // 这种情况由 applyFilters 处理
             }
 
             let html = `<table id="resultsTable">
@@ -192,7 +288,6 @@
                                     <th>状态/类型</th>
                                     <th>记录值/错误信息</th>
                                     <th>对应厂商</th>
-                                
                                 </tr>
                             </thead>
                             <tbody>`;
@@ -211,10 +306,12 @@
             });
             
             html += `</tbody></table>`;
+            
+            // 将新表格追加到 resultsDiv 的末尾
             resultsDiv.innerHTML += html;
         }
         
-        // --- 1. 实时查询逻辑 (关键修复点：替换 statusDivId) ---
+        // --- 1. 实时查询逻辑 ---
         document.getElementById('queryForm').addEventListener('submit', function(e) {
             e.preventDefault();
             
@@ -226,18 +323,19 @@
             localStorage.setItem(DNS_SERVERS_KEY, dnsServers);
             
             loadingDiv.style.display = 'block';
-            document.getElementById('results').innerHTML = '';
+            document.getElementById('results').innerHTML = ''; // 清空结果
+            document.getElementById('exportButton').disabled = true; // 禁用导出
 
             const payload = { domains: domains, dns_servers: dnsServers };
 
-            // **修复点**：将 'vendorStatusMessage' 替换为 'queryStatusMessage'
             submitForm('/query', payload, 'queryButton', 'queryStatusMessage', (data) => {
                 loadingDiv.style.display = 'none';
                 
                 LAST_QUERY_RESULTS = data.results; 
+                // 设置查询结果的容器内容，包括标题和耗时
                 document.getElementById('results').innerHTML = `<h2>查询结果 (${data.results.length} 条记录)</h2>
                                                                <p>总耗时: ${data.time_taken}</p>`;
-                applyFilters(); 
+                applyFilters(); // 自动应用筛选并渲染表格，启用导出按钮
             });
         });
 
