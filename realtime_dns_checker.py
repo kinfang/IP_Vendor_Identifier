@@ -35,7 +35,7 @@ DB_CONFIG = {
    "port": int(os.environ.get("DB_PORT", 3306)),
 }
 IP_VENDOR_MAP_CACHE = []
-CIDR_MAP_LOADED = False # 🚨 新增：用于跟踪 CIDR 映射是否已成功加载
+CIDR_MAP_LOADED = False # 用于跟踪 CIDR 映射是否已成功加载
 
 
 # ====================================================================
@@ -66,18 +66,17 @@ def get_db_connection():
    try:
       return mysql.connector.connect(**DB_CONFIG)
    except mysql.connector.Error as e:
-      # print(f"❌ DEBUG: 数据库连接失败: {e}", file=sys.stderr) # 可选的更详细调试信息
+      # print(f"❌ DEBUG: 数据库连接失败: {e}", file=sys.stderr)
       return None
 
 def load_cidr_map_from_db():
    conn = get_db_connection()
    if not conn:
       print("❌ 警告: 无法连接数据库，厂商映射无法加载。", file=sys.stderr)
-      return False # 🚨 返回 False 表示加载失败
+      return False 
    
    global IP_VENDOR_MAP_CACHE
    cursor = conn.cursor()
-   # 数据库中包含 description，但缓存中我们仅存储 network object 和 vendor_name 以简化查找
    sql = "SELECT cidr_range, vendor_name FROM ip_vendor_map" 
    
    success = False
@@ -86,8 +85,6 @@ def load_cidr_map_from_db():
       rows = cursor.fetchall()
       IP_VENDOR_MAP_CACHE = []
       
-      # 修复点 1: 将 strict=True 改为 strict=False
-      # 允许 ipaddress 自动纠正非标准网络地址，防止数据被静默跳过
       for cidr_str, vendor_name in rows:
          try:
             network = ipaddress.ip_network(cidr_str, strict=False) 
@@ -103,7 +100,7 @@ def load_cidr_map_from_db():
    finally:
       cursor.close()
       conn.close()
-   return success # 🚨 返回加载结果
+   return success 
 
 def lookup_vendor(ip_address_str):
    try:
@@ -263,7 +260,6 @@ def delete_vendor(vendor_id):
       cursor.close()
       conn.close()
 
-# --- 新增: 更新厂商 API 路由 ---
 @APP.route('/update_vendor/<int:vendor_id>', methods=['POST'])
 @login_required 
 def update_vendor(vendor_id):
@@ -302,7 +298,7 @@ def update_vendor(vendor_id):
       if rows_affected == 0:
          return jsonify({'status': 'error', 'message': f'未找到 ID 为 {vendor_id} 的厂商记录或数据未更改。'}), 404
 
-      # 更新后刷新内存缓存
+      # 更新后刷新内存缓存，确保查询功能立即生效
       load_cidr_map_from_db()
       
       return jsonify({'status': 'success', 'message': f'厂商记录 ID {vendor_id} 更新成功，内存缓存已刷新。'})
@@ -316,6 +312,7 @@ def update_vendor(vendor_id):
       cursor.close()
       conn.close()
 
+
 # ----------------- 保持原有 API -----------------
 
 @APP.route('/query', methods=['POST'])
@@ -327,10 +324,17 @@ def handle_query():
    dns_input = data.get('dns_servers', '')
    
    domains = [d.strip() for d in domains_input.split('\n') if d.strip()]
-   custom_servers = [ip.strip() for ip in dns_input.split('\n') if ip.strip()]
+   
+   # >>>>>> 核心修改点：过滤掉以 '#' 开头（忽略前后空格）的行 <<<<<<
+   custom_servers = [
+       ip.strip() 
+       for ip in dns_input.split('\n') 
+       if ip.strip() and not ip.strip().startswith('#') # 确保不为空且不以 # 开头
+   ]
+   # >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
 
    if not custom_servers:
-      return jsonify({'error': '请至少提供一个 DNS 服务器 IP 地址。'}), 400
+      return jsonify({'error': '请至少提供一个 DNS 服务器 IP 地址（非注释行）。'}), 400
    if not domains:
       return jsonify({'error': '请提供域名列表。'}), 400
 
@@ -403,7 +407,6 @@ def add_vendor():
       return jsonify({'status': 'error', 'message': '厂商名称和 CIDR 范围不能为空。'}), 400
       
    try:
-      # 修复点 2: 将 strict=True 改为 strict=False
       # 允许用户输入非标准网络地址，并在内部将其视为标准网络地址
       ipaddress.ip_network(cidr_range, strict=False) 
    except ValueError:
@@ -432,6 +435,3 @@ def add_vendor():
    finally:
       cursor.close()
       conn.close()
-
-
-# 🚨 确保文件底部没有其他数据库相关的调用！
