@@ -6,6 +6,8 @@
 
   * **指定 DNS 查询:** 允许用户指定权威 DNS 或递归 DNS 服务器进行精确查询。
   * **IP 归属识别:** 将域名解析到的 IP 地址与内部数据库中的厂商 IP 范围进行匹配。
+  * **厂商 IP 映射管理：** 支持对内部 IP 范围（CIDR）和厂商名称、描述进行**增、删、改、查**全生命周期管理。
+  * **智能 IP 筛选：** 在厂商管理界面，支持输入 **IP 地址** 进行 CIDR 范围的**精确匹配查询**，也支持模糊匹配厂商名称和描述。
   * **解析结果验证:** 方便快速验证 IP 地址的实际归属和运营商信息。
   * **容器化部署:** 通过 Docker Compose 一键启动应用和数据库服务。
   * **安全认证:** 基于密码哈希的环境变量管理管理员登录凭据。
@@ -47,10 +49,10 @@ cd IP_Vendor_Identifier
 
 2.  **生成密钥和哈希:**
 
-    | 变量 | 目的 | 生成方式 (在终端运行 Python) |
-    | :--- | :--- | :--- |
-    | `FLASK_SECRET_KEY` | Flask 会话和安全 | `python -c "import os; print(os.urandom(32).hex())"` |
-    | `ADMIN_PASSWORD_HASH` | 管理员密码哈希 | `python -c "from werkzeug.security import generate_password_hash; print(generate_password_hash('your_secure_password', method='scrypt'))"` |
+| 变量 | 目的 | 生成方式 (在终端运行 Python) |
+| :--- | :--- | :--- |
+| `FLASK_SECRET_KEY` | Flask 会话和安全 | `python -c "import os; print(os.urandom(32).hex())"` |
+| `ADMIN_PASSWORD_HASH` | 管理员密码哈希 | `python -c "from werkzeug.security import generate_password_hash; print(generate_password_hash('your_secure_password', method='scrypt'))"` |
 
 3.  **编辑 `.env` 文件:**
 
@@ -72,7 +74,7 @@ cd IP_Vendor_Identifier
     DB_PASSWORD=YOUR_APP_DB_PASSWORD
     DB_NAME=ip_vendor_db
 
-    # --- 3. MariaDB 服务初始化配置 ---
+    # --- 3. MariaDB 服务初始化配置 ---\r
     # MySQL Root 密码 (用于数据库初始化和管理)
     MYSQL_ROOT_PASSWORD=YOUR_ROOT_PASSWORD 
     MYSQL_USER=ip_vendor_user      # 必须与 DB_USER 匹配
@@ -82,7 +84,7 @@ cd IP_Vendor_Identifier
 
 ### 4\. 启动服务
 
-**重要说明：** 由于项目在 CentOS 环境下存在兼容性问题，首次构建时必须分两步执行，以避免缓存和命令语法错误。
+**重要说明：** 由于项目在 CentOS 环境下存在兼容性问题，首次构建和后续更新都推荐使用**强制无缓存**方式构建应用镜像。
 
 1.  **构建应用镜像（强制无缓存）：**
     此步骤使用 `python:3.11-alpine` 构建，并安装 `mariadb-dev` 依赖。
@@ -110,7 +112,7 @@ http://localhost:55556
 
 使用您在 `.env` 中配置的 `ADMIN_USERNAME` 和对应密码进行登录。
 
-## 💻 维护与日志
+## 💻 维护、更新与日志
 
 ### 查看实时日志
 
@@ -119,6 +121,23 @@ http://localhost:55556
 ```bash
 docker-compose logs -f app
 ```
+
+### 更新应用代码或配置
+
+当您修改了 Python 代码 (`realtime_dns_checker.py`) 或 HTML 模板文件 (`templates/*.html`) 后，必须执行以下命令来强制 Docker 重新构建和部署新代码，以避免缓存问题：
+
+1.  **停止并移除旧容器：**
+    ```bash
+    docker-compose down
+    ```
+2.  **强制无缓存重新构建镜像：**
+    ```bash
+    docker-compose build --no-cache
+    ```
+3.  **重新启动服务：**
+    ```bash
+    docker-compose up -d
+    ```
 
 ### 停止和移除服务
 
@@ -135,5 +154,3 @@ docker-compose down -v
 ```
 
 > **关于数据持久性:** 数据库数据存储在 Docker 自动管理的命名卷 (`db_data`) 中，位于您的宿主机上。运行 `docker-compose down -v` 会删除此卷，导致数据丢失。
-
------
