@@ -20,8 +20,28 @@
         th { background-color: #5bc0de; color: white; }
         .delete-btn { background-color: #dc3545; color: white; border: none; cursor: pointer; padding: 5px 10px; border-radius: 4px; transition: background-color 0.3s; }
         .delete-btn:hover { background-color: #c82333; }
+        
+        /* 新增的修改按钮样式 */
+        .edit-btn { background-color: #007bff; color: white; border: none; cursor: pointer; padding: 5px 10px; border-radius: 4px; margin-right: 5px; transition: background-color 0.3s; }
+        .edit-btn:hover { background-color: #0056b3; }
+
         .status-message { margin-top: 15px; font-weight: bold; }
         .nav-link { margin-left: 15px; color: #007bff; text-decoration: none; font-weight: bold;}
+
+        /* 新增：模态框样式 */
+        .modal {
+            display: none; position: fixed; z-index: 1; left: 0; top: 0; 
+            width: 100%; height: 100%; overflow: auto; background-color: rgba(0,0,0,0.4);
+        }
+        .modal-content {
+            background-color: #fefefe; margin: 15% auto; padding: 20px; 
+            border: 1px solid #888; width: 80%; max-width: 600px; border-radius: 8px;
+            box-shadow: 0 5px 15px rgba(0,0,0,0.3);
+        }
+        .close-btn { color: #aaa; float: right; font-size: 28px; font-weight: bold; }
+        .close-btn:hover, .close-btn:focus { color: #000; text-decoration: none; cursor: pointer; }
+        #saveEditButton { background-color: #28a745; color: white; margin-top: 20px; }
+        #saveEditButton:hover { background-color: #1e7e34; }
     </style>
 </head>
 <body>
@@ -60,16 +80,130 @@
         <div id="vendorStatusMessage" class="status-message"></div>
 
         <hr style="margin: 30px 0;">
+        
+        <h2>🔎 筛选厂商</h2>
+        <div class="form-row" style="margin-bottom: 20px;">
+            <div style="flex: none; width: 100%;">
+                <input type="text" id="filterVendorInput" placeholder="请输入厂商名称、CIDR 或 IP 地址进行筛选..." style="width: 100%;">
+            </div>
+        </div>
+        
+        <hr style="margin: 30px 0;">
         <h2>📑 现有厂商列表</h2>
         <div id="vendorListContainer">
             <p>正在加载厂商数据...</p>
         </div>
     </div>
+    
+    <div id="editVendorModal" class="modal">
+        <div class="modal-content">
+            <span class="close-btn" onclick="closeModal()">&times;</span>
+            <h2>✏️ 修改厂商 IP 映射</h2>
+            <form id="editVendorForm">
+                <input type="hidden" id="editVendorId">
+                
+                <label for="editVendorName">厂商名称:</label>
+                <input type="text" id="editVendorName" required>
+                
+                <label for="editCidrRange">CIDR 范围 (例如: 10.0.0.0/8):</label>
+                <input type="text" id="editCidrRange" required>
+                
+                <label for="editVendorDescription">描述 (可选):</label>
+                <input type="text" id="editVendorDescription">
+                
+                <button type="submit" id="saveEditButton">保存修改</button>
+            </form>
+            <div id="editStatusMessage" class="status-message"></div>
+        </div>
+    </div>
 
     <script>
-        document.addEventListener('DOMContentLoaded', fetchVendors);
+        // 新增: 用于存储所有厂商数据的全局变量
+        let ALL_VENDORS = []; 
 
-        // --- 核心功能函数 ---
+        document.addEventListener('DOMContentLoaded', () => {
+             fetchVendors();
+             
+             // 新增: 筛选器事件绑定
+             document.getElementById('filterVendorInput').addEventListener('input', applyVendorFilters);
+        });
+
+        // ====================================================================
+        //                   新增: IP/CIDR 匹配工具函数 (仅支持 IPv4)
+        // ====================================================================
+
+        /**
+         * 检查字符串是否为有效的 IPv4 地址格式。
+         * @param {string} ipAddressStr 
+         */
+        function isValidIPv4(ipAddressStr) {
+            // 匹配 0-255.0-255.0-255.0-255 格式的 IP 地址
+            const ipv4Regex = /^(\d{1,3}\.){3}\d{1,3}$/;
+            if (!ipv4Regex.test(ipAddressStr)) {
+                return false;
+            }
+            // 进一步检查每个部分是否在 0-255 范围内
+            return ipAddressStr.split('.').every(part => {
+                const num = parseInt(part, 10);
+                return num >= 0 && num <= 255;
+            });
+        }
+        
+        /**
+         * 将 IPv4 地址字符串转换为 32 位整数 (Long)。
+         * @param {string} ipAddressStr 
+         */
+        function ipv4ToLong(ipAddressStr) {
+            // 如果不是有效的 IPv4，返回 NaN 或抛出错误
+            if (!isValidIPv4(ipAddressStr)) return NaN;
+            
+            const parts = ipAddressStr.split('.');
+            let long = 0;
+            // (a * 256^3) + (b * 256^2) + (c * 256^1) + d
+            for (let i = 0; i < 4; i++) {
+                // 使用位运算替代乘法可能更高效，但在 JS 中需注意 32位整数限制，此处使用乘法并依赖 JS 的 Number 类型
+                long = (long * 256) + parseInt(parts[i], 10);
+            }
+            return long;
+        }
+
+        /**
+         * 检查给定的 IP 地址是否包含在 CIDR 范围内。
+         * @param {string} ipAddress IP 地址字符串
+         * @param {string} cidrRange CIDR 范围字符串 (如: 192.168.1.0/24)
+         */
+        function isIpInCidr(ipAddress, cidrRange) {
+            try {
+                if (!isValidIPv4(ipAddress)) return false;
+                if (!cidrRange.includes('/')) return false;
+
+                const [networkAddressStr, maskLengthStr] = cidrRange.split('/');
+                const ipLong = ipv4ToLong(ipAddress);
+                const networkLong = ipv4ToLong(networkAddressStr);
+                const maskLength = parseInt(maskLengthStr, 10);
+
+                // 检查 IP 地址和网络地址是否有效
+                if (isNaN(ipLong) || isNaN(networkLong)) return false;
+                // 检查掩码长度有效性 (IPv4 范围 0-32)
+                if (isNaN(maskLength) || maskLength < 0 || maskLength > 32) return false;
+
+                // 计算子网掩码 (使用左移位操作符)
+                // JS 中的位运算是 32 位带符号整数，使用 >>> 无符号右移确保得到正确的网络掩码
+                const mask = -1 << (32 - maskLength); 
+
+                // 比较 IP 地址和网络地址经过掩码后的结果
+                return (ipLong & mask) === (networkLong & mask);
+
+            } catch (e) {
+                // 忽略解析错误，视为不匹配
+                return false;
+            }
+        }
+
+
+        // ====================================================================
+        //                   核心功能函数
+        // ====================================================================
 
         function fetchVendors() {
             const container = document.getElementById('vendorListContainer');
@@ -79,7 +213,8 @@
                 .then(response => response.json())
                 .then(data => {
                     if (data.status === 'success') {
-                        renderVendorTable(data.vendors);
+                        ALL_VENDORS = data.vendors; // 存储所有厂商数据
+                        applyVendorFilters();        // 应用筛选并渲染
                     } else {
                         container.innerHTML = `<p style="color: red;">加载失败: ${data.message}</p>`;
                     }
@@ -88,13 +223,56 @@
                     container.innerHTML = `<p style="color: red;">网络错误: ${error}</p>`;
                 });
         }
+        
+        /**
+         * 应用筛选逻辑，支持厂商名称、CIDR 字符串包含、以及 IP 地址段精确匹配。
+         */
+        function applyVendorFilters() {
+            const filterInput = document.getElementById('filterVendorInput');
+            const filterText = filterInput.value.toLowerCase().trim();
+
+            if (filterText === '') {
+                 renderVendorTable(ALL_VENDORS);
+                 return;
+            }
+            
+            let filteredVendors = [];
+
+            // 检查输入是否是一个有效的 IPv4 地址 (精确匹配 IP 地址段)
+            if (isValidIPv4(filterText)) {
+                // 如果是有效的 IP 地址，使用精确的 CIDR 包含检查
+                filteredVendors = ALL_VENDORS.filter(vendor => 
+                    isIpInCidr(filterText, vendor.cidr_range)
+                );
+            } else {
+                // 否则，使用字符串包含检查 (匹配名称、部分 CIDR、描述)
+                filteredVendors = ALL_VENDORS.filter(vendor => 
+                    vendor.vendor_name.toLowerCase().includes(filterText) ||
+                    vendor.cidr_range.toLowerCase().includes(filterText) ||
+                    (vendor.description && vendor.description.toLowerCase().includes(filterText))
+                );
+            }
+            
+            renderVendorTable(filteredVendors);
+        }
 
         function renderVendorTable(vendors) {
             const container = document.getElementById('vendorListContainer');
-            if (vendors.length === 0) {
-                container.innerHTML = '<p>数据库中暂无厂商 IP 映射记录。</p>';
-                return;
+            
+            if (vendors.length === 0 && ALL_VENDORS.length > 0) {
+                 container.innerHTML = '<p>没有匹配当前筛选条件的厂商 IP 映射记录。</p>';
+                 return;
             }
+            if (vendors.length === 0 && ALL_VENDORS.length === 0) {
+                 container.innerHTML = '<p>数据库中暂无厂商 IP 映射记录。</p>';
+                 return;
+            }
+            
+            // 新增: 存储厂商数据到全局变量，方便编辑时查找
+            window.vendorCache = vendors.reduce((acc, vendor) => {
+                acc[vendor.id] = vendor;
+                return acc;
+            }, {});
 
             let html = `<table>
                             <thead>
@@ -109,6 +287,7 @@
                             <tbody>`;
             
             vendors.forEach(vendor => {
+                // 修改点 1: 增加修改按钮
                 html += `
                     <tr>
                         <td>${vendor.id}</td>
@@ -116,6 +295,7 @@
                         <td>${vendor.cidr_range}</td>
                         <td>${vendor.description || 'N/A'}</td>
                         <td>
+                            <button class="edit-btn" onclick="editVendor(${vendor.id})">修改</button>
                             <button class="delete-btn" onclick="deleteVendor(${vendor.id})">删除</button>
                         </td>
                     </tr>
@@ -144,7 +324,7 @@
                 if (data.status === 'success') {
                     statusDiv.innerText = data.message;
                     statusDiv.style.color = 'green';
-                    fetchVendors(); // 刷新列表
+                    fetchVendors(); // 刷新列表并重新应用筛选
                 } else {
                     statusDiv.innerText = `删除失败: ${data.message}`;
                     statusDiv.style.color = 'red';
@@ -155,8 +335,42 @@
                 statusDiv.style.color = 'red';
             });
         }
+
+        // --- 编辑模态框相关函数 ---
+        function editVendor(vendorId) {
+            const vendor = window.vendorCache[vendorId];
+            if (!vendor) {
+                alert('未找到该厂商数据！请先刷新页面。');
+                return;
+            }
+
+            // 填充模态框表单
+            document.getElementById('editVendorId').value = vendor.id;
+            document.getElementById('editVendorName').value = vendor.vendor_name;
+            document.getElementById('editCidrRange').value = vendor.cidr_range;
+            document.getElementById('editVendorDescription').value = vendor.description || '';
+            document.getElementById('editStatusMessage').innerHTML = ''; // 清空状态信息
+
+            // 显示模态框
+            document.getElementById('editVendorModal').style.display = 'block';
+        }
         
-        // --- 表单提交逻辑 (从 query_form.html 迁移) ---
+        function closeModal() {
+            document.getElementById('editVendorModal').style.display = 'none';
+        }
+        
+        // 点击窗口外部关闭模态框
+        window.onclick = function(event) {
+            const modal = document.getElementById('editVendorModal');
+            if (event.target == modal) {
+                closeModal();
+            }
+        }
+
+
+        // --- 表单提交逻辑 ---
+        
+        // 1. 添加厂商表单提交
         document.getElementById('addVendorForm').addEventListener('submit', function(e) {
             e.preventDefault();
             
@@ -200,6 +414,53 @@
             .catch(error => {
                 button.disabled = false;
                 button.innerText = '添加厂商 IP';
+                statusDiv.innerText = `网络或服务器连接失败: ${error}`;
+                statusDiv.style.color = 'red';
+            });
+        });
+
+        // 2. 修改厂商表单提交
+        document.getElementById('editVendorForm').addEventListener('submit', function(e) {
+            e.preventDefault();
+            
+            const vendorId = document.getElementById('editVendorId').value;
+            const button = document.getElementById('saveEditButton');
+            const statusDiv = document.getElementById('editStatusMessage');
+            
+            const payload = {
+                vendor_name: document.getElementById('editVendorName').value,
+                cidr_range: document.getElementById('editCidrRange').value,
+                description: document.getElementById('editVendorDescription').value
+            };
+            
+            statusDiv.innerHTML = '';
+            button.disabled = true;
+            button.innerText = '保存中...';
+
+            // 调用更新 API
+            fetch(`/update_vendor/${vendorId}`, { 
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(payload)
+            })
+            .then(response => response.json())
+            .then(data => {
+                button.disabled = false;
+                button.innerText = '保存修改';
+
+                if (data.status === 'success') {
+                    statusDiv.innerText = data.message;
+                    statusDiv.style.color = 'green';
+                    closeModal(); // 关闭模态框
+                    fetchVendors(); // 刷新列表
+                } else {
+                    statusDiv.innerText = `操作失败: ${data.message}`;
+                    statusDiv.style.color = 'red';
+                }
+            })
+            .catch(error => {
+                button.disabled = false;
+                button.innerText = '保存修改';
                 statusDiv.innerText = `网络或服务器连接失败: ${error}`;
                 statusDiv.style.color = 'red';
             });
