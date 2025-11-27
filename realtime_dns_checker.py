@@ -31,7 +31,7 @@ DB_CONFIG = {
    "host": os.environ.get("DB_HOST", "db"), 
    "user": os.environ.get("DB_USER", ""),
    "password": os.environ.get("DB_PASSWORD", ""),    
-   "database": os.environ.get("DB_NAME", "dns_checker_db"),
+   "database": os.environ.get("DB_NAME", "ip_vendor_db"),
    "port": int(os.environ.get("DB_PORT", 3306)),
 }
 IP_VENDOR_MAP_CACHE = []
@@ -259,6 +259,59 @@ def delete_vendor(vendor_id):
    
    except mysql.connector.Error as err:
       return jsonify({'status': 'error', 'message': f'数据库删除失败: {err.msg}'}), 500
+   finally:
+      cursor.close()
+      conn.close()
+
+# --- 新增: 更新厂商 API 路由 ---
+@APP.route('/update_vendor/<int:vendor_id>', methods=['POST'])
+@login_required 
+def update_vendor(vendor_id):
+   data = request.json
+   
+   vendor_name = data.get('vendor_name')
+   cidr_range = data.get('cidr_range')
+   description = data.get('description', '')
+
+   if not vendor_name or not cidr_range:
+      return jsonify({'status': 'error', 'message': '厂商名称和 CIDR 范围不能为空。'}), 400
+      
+   try:
+      # 验证 CIDR 范围格式
+      ipaddress.ip_network(cidr_range, strict=False) 
+   except ValueError:
+      return jsonify({'status': 'error', 'message': 'CIDR 范围格式无效，请检查。'}), 400
+
+   conn = get_db_connection()
+   if not conn:
+      return jsonify({'status': 'error', 'message': '无法连接数据库进行更新操作。'}), 500
+   
+   cursor = conn.cursor()
+   # 使用 UPDATE 语句
+   sql = """
+      UPDATE ip_vendor_map 
+      SET vendor_name = %s, cidr_range = %s, description = %s
+      WHERE id = %s
+   """
+   
+   try:
+      cursor.execute(sql, (vendor_name, cidr_range, description, vendor_id))
+      rows_affected = cursor.rowcount
+      conn.commit()
+      
+      if rows_affected == 0:
+         return jsonify({'status': 'error', 'message': f'未找到 ID 为 {vendor_id} 的厂商记录或数据未更改。'}), 404
+
+      # 更新后刷新内存缓存
+      load_cidr_map_from_db()
+      
+      return jsonify({'status': 'success', 'message': f'厂商记录 ID {vendor_id} 更新成功，内存缓存已刷新。'})
+   
+   except mysql.connector.IntegrityError:
+      # 可能是新的 cidr_range 与其他记录重复
+      return jsonify({'status': 'error', 'message': f'CIDR 范围 "{cidr_range}" 已存在于其他记录中，请检查。'}), 409
+   except mysql.connector.Error as err:
+      return jsonify({'status': 'error', 'message': f'数据库更新失败: {err.msg}'}), 500
    finally:
       cursor.close()
       conn.close()
