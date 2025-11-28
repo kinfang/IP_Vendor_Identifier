@@ -34,8 +34,10 @@ DB_CONFIG = {
    "database": os.environ.get("DB_NAME", "ip_vendor_db"),
    "port": int(os.environ.get("DB_PORT", 3306)),
 }
+# ⚠️ 全局变量。每个 Gunicorn Worker 进程都有独立的副本。
 IP_VENDOR_MAP_CACHE = []
-CIDR_MAP_LOADED = False # 用于跟踪 CIDR 映射是否已成功加载
+# 新增：记录当前 Worker 进程最近一次成功加载缓存的时间戳
+LAST_CACHE_LOAD_TIME = 0.0 
 
 
 # ====================================================================
@@ -69,13 +71,61 @@ def get_db_connection():
       # print(f"❌ DEBUG: 数据库连接失败: {e}", file=sys.stderr)
       return None
 
+def get_last_db_update_time():
+   """从数据库的 system_config 表中获取共享的最后更新时间戳。"""
+   conn = get_db_connection()
+   if not conn:
+      return 0.0 # 数据库连接失败时返回 0，避免频繁尝试加载
+   
+   cursor = conn.cursor()
+   sql = "SELECT config_value FROM system_config WHERE config_key = 'last_vendor_update'"
+   
+   try:
+      cursor.execute(sql)
+      result = cursor.fetchone()
+      if result:
+         return float(result[0])
+      return 0.0
+   except Exception as e:
+      print(f"❌ 获取数据库更新时间失败: {e}", file=sys.stderr)
+      return 0.0
+   finally:
+      cursor.close()
+      conn.close()
+
+def set_db_update_time(timestamp):
+   """将当前的 Unix 时间戳写入数据库，作为共享的更新信号。"""
+   conn = get_db_connection()
+   if not conn:
+      print("❌ 警告: 无法连接数据库设置更新时间。", file=sys.stderr)
+      return False 
+   
+   cursor = conn.cursor()
+   sql = """
+      INSERT INTO system_config (config_key, config_value) VALUES ('last_vendor_update', %s)
+      ON DUPLICATE KEY UPDATE config_value = %s
+   """
+   try:
+      cursor.execute(sql, (str(timestamp), str(timestamp)))
+      conn.commit()
+      return True
+   except Exception as e:
+      print(f"❌ 设置数据库更新时间失败: {e}", file=sys.stderr)
+      return False
+   finally:
+      cursor.close()
+      conn.close()
+
 def load_cidr_map_from_db():
+   """从数据库加载 IP 厂商映射，按 CIDR 长度降序排序，并更新 Worker 的加载时间。"""
    conn = get_db_connection()
    if not conn:
       print("❌ 警告: 无法连接数据库，厂商映射无法加载。", file=sys.stderr)
       return False 
    
    global IP_VENDOR_MAP_CACHE
+   global LAST_CACHE_LOAD_TIME
+   
    cursor = conn.cursor()
    sql = "SELECT cidr_range, vendor_name FROM ip_vendor_map" 
    
@@ -83,7 +133,7 @@ def load_cidr_map_from_db():
    try:
       cursor.execute(sql)
       rows = cursor.fetchall()
-      IP_VENDOR_MAP_CACHE = []
+      IP_VENDOR_MAP_CACHE = [] # 清除旧缓存
       
       for cidr_str, vendor_name in rows:
          try:
@@ -93,7 +143,13 @@ def load_cidr_map_from_db():
             print(f"❌ 警告: 跳过数据库中无效的 CIDR 字符串: {cidr_str}", file=sys.stderr)
             pass 
             
-      print(f"✅ 厂商映射加载成功，共 {len(IP_VENDOR_MAP_CACHE)} 条记录。", file=sys.stderr)
+      # 按 CIDR 长度（前缀长度）降序排序，确保最精确匹配优先
+      IP_VENDOR_MAP_CACHE.sort(key=lambda x: x[0].prefixlen, reverse=True)
+      
+      # 只有成功加载后才更新本 Worker 的加载时间戳
+      LAST_CACHE_LOAD_TIME = time.time()
+            
+      print(f"✅ 厂商映射加载成功，共 {len(IP_VENDOR_MAP_CACHE)} 条记录。Worker 缓存时间: {LAST_CACHE_LOAD_TIME}", file=sys.stderr)
       success = True
    except Exception as e:
       print(f"❌ 加载 CIDR 映射失败: {e}", file=sys.stderr)
@@ -102,12 +158,27 @@ def load_cidr_map_from_db():
       conn.close()
    return success 
 
+def check_and_reload_cache():
+   """检查共享的数据库更新时间戳，如果比本 Worker 的缓存时间新，则触发重新加载。"""
+   global LAST_CACHE_LOAD_TIME
+   
+   # 1. 检查数据库的共享时间戳
+   db_update_time = get_last_db_update_time()
+   
+   # 2. 比较时间戳，或检查缓存是否从未加载过
+   if db_update_time > LAST_CACHE_LOAD_TIME or LAST_CACHE_LOAD_TIME == 0.0:
+      print(f"💡 INFO: 发现数据更新信号 (DB: {db_update_time} > Worker: {LAST_CACHE_LOAD_TIME})，正在重新加载缓存...", file=sys.stderr)
+      load_cidr_map_from_db()
+
 def lookup_vendor(ip_address_str):
    try:
+      # 确保在查询前，当前 Worker 的缓存已同步
+      check_and_reload_cache()
+      
       # 将输入 IP 地址转换为 IP 地址对象
       ip_obj = ipaddress.ip_address(ip_address_str) 
       
-      # 遍历内存缓存，进行包含性检查
+      # 遍历内存缓存。由于缓存已排序，第一个匹配到的就是最精确的。
       for network, vendor_name in IP_VENDOR_MAP_CACHE:
          # 核心查找逻辑：检查 IP 对象是否在 network 范围内
          if ip_obj in network:
@@ -151,22 +222,6 @@ def resolve_domain_with_custom_dns(domain, custom_servers):
 #                   认证和视图路由
 # ====================================================================
 
-@APP.before_request
-def initial_setup():
-    global CIDR_MAP_LOADED
-    
-    # 核心逻辑：如果已经加载，则直接返回，保证只运行一次
-    if CIDR_MAP_LOADED:
-        return 
-        
-    print("💡 INFO: 容器首次启动，尝试加载厂商映射...", file=sys.stderr)
-    if load_cidr_map_from_db():
-        CIDR_MAP_LOADED = True
-    else:
-        # 如果首次加载失败，应用会继续运行，并在后续 API 调用时按需重试
-        print("❌ WARNING: 首次厂商映射加载失败，应用将继续运行。", file=sys.stderr)
-
-
 @APP.route('/login', methods=['GET', 'POST'])
 def login():
    if current_user.is_authenticated:
@@ -180,10 +235,9 @@ def login():
          user = load_user(username)
          login_user(user)
          flash('登录成功！', 'success')
-         # 登录成功后，确保 DB 映射也加载了
-         global CIDR_MAP_LOADED
-         if not CIDR_MAP_LOADED:
-            load_cidr_map_from_db()
+         
+         # 首次登录时，强制当前 Worker 加载缓存，确保登录后的第一个查询是准确的。
+         load_cidr_map_from_db()
             
          return redirect(url_for('index'))
       else:
@@ -213,6 +267,9 @@ def vendor_manage_page():
 @APP.route('/api/vendors', methods=['GET'])
 @login_required
 def get_vendors():
+   # 在展示列表前，先检查并同步当前 Worker 的缓存
+   check_and_reload_cache()
+   
    conn = get_db_connection()
    if not conn:
       # DB 连接失败时，返回 500 错误
@@ -249,10 +306,12 @@ def delete_vendor(vendor_id):
       if rows_affected == 0:
          return jsonify({'status': 'error', 'message': '厂商记录不存在。'}), 404
 
-      # 删除后刷新内存缓存
+      # 关键操作 1：删除后刷新当前 worker 的内存缓存
       load_cidr_map_from_db()
+      # 关键操作 2：更新数据库中的共享时间戳，通知其他 Worker 
+      set_db_update_time(time.time())
       
-      return jsonify({'status': 'success', 'message': f'厂商记录 ID {vendor_id} 删除成功，缓存已刷新。'})
+      return jsonify({'status': 'success', 'message': f'厂商记录 ID {vendor_id} 删除成功，缓存已同步。'})
    
    except mysql.connector.Error as err:
       return jsonify({'status': 'error', 'message': f'数据库删除失败: {err.msg}'}), 500
@@ -296,12 +355,15 @@ def update_vendor(vendor_id):
       conn.commit()
       
       if rows_affected == 0:
-         return jsonify({'status': 'error', 'message': f'未找到 ID 为 {vendor_id} 的厂商记录或数据未更改。'}), 404
+         # 如果数据未更改，不需要刷新缓存
+         return jsonify({'status': 'success', 'message': f'厂商记录 ID {vendor_id} 未更改。'})
 
-      # 更新后刷新内存缓存，确保查询功能立即生效
+      # 关键操作 1：更新后刷新当前 worker 的内存缓存
       load_cidr_map_from_db()
+      # 关键操作 2：更新数据库中的共享时间戳，通知其他 Worker 
+      set_db_update_time(time.time())
       
-      return jsonify({'status': 'success', 'message': f'厂商记录 ID {vendor_id} 更新成功，内存缓存已刷新。'})
+      return jsonify({'status': 'success', 'message': f'厂商记录 ID {vendor_id} 更新成功，缓存已同步。'})
    
    except mysql.connector.IntegrityError:
       # 可能是新的 cidr_range 与其他记录重复
@@ -318,6 +380,9 @@ def update_vendor(vendor_id):
 @APP.route('/query', methods=['POST'])
 @login_required 
 def handle_query():
+   # 核心修复点：在每次查询开始时，检查并同步当前 Worker 的缓存
+   check_and_reload_cache()
+   
    data = request.json
    
    domains_input = data.get('domains', '')
@@ -325,13 +390,12 @@ def handle_query():
    
    domains = [d.strip() for d in domains_input.split('\n') if d.strip()]
    
-   # >>>>>> 核心修改点：过滤掉以 '#' 开头（忽略前后空格）的行 <<<<<<
+   # 过滤掉以 '#' 开头（忽略前后空格）的行
    custom_servers = [
        ip.strip() 
        for ip in dns_input.split('\n') 
-       if ip.strip() and not ip.strip().startswith('#') # 确保不为空且不以 # 开头
+       if ip.strip() and not ip.strip().startswith('#')
    ]
-   # >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
 
    if not custom_servers:
       return jsonify({'error': '请至少提供一个 DNS 服务器 IP 地址（非注释行）。'}), 400
@@ -423,10 +487,12 @@ def add_vendor():
       cursor.execute(sql, (cidr_range, vendor_name, description))
       conn.commit()
       
-      # 添加后刷新内存缓存
+      # 关键操作 1：添加后刷新当前 worker 的内存缓存
       load_cidr_map_from_db()
+      # 关键操作 2：更新数据库中的共享时间戳，通知其他 Worker 
+      set_db_update_time(time.time())
       
-      return jsonify({'status': 'success', 'message': f'厂商 "{vendor_name}" (CIDR: {cidr_range}) 添加成功，内存缓存已刷新。'})
+      return jsonify({'status': 'success', 'message': f'厂商 "{vendor_name}" (CIDR: {cidr_range}) 添加成功，缓存已同步。'})
    
    except mysql.connector.IntegrityError:
       return jsonify({'status': 'error', 'message': f'CIDR 范围 "{cidr_range}" 已存在，请勿重复添加。'}), 409

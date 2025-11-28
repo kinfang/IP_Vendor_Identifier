@@ -11,3 +11,13 @@ CREATE TABLE IF NOT EXISTS ip_vendor_map (
     description TEXT,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- 新增：用于存储应用系统配置和缓存同步信号的表
+CREATE TABLE IF NOT EXISTS system_config (
+    config_key VARCHAR(100) PRIMARY KEY,
+    config_value VARCHAR(255)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- 初始化厂商 IP 映射的最后更新时间为 0，确保所有 Worker 在启动时都会加载缓存
+INSERT INTO system_config (config_key, config_value) VALUES ('last_vendor_update', '0')
+ON DUPLICATE KEY UPDATE config_value = config_value;
