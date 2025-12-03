@@ -4,6 +4,9 @@
     <meta charset="UTF-8">
     <title>IP 厂商识别工具</title>
     <style>
+        /* ------------------------------------------- */
+        /* 还原用户提供的 CSS 样式 */
+        /* ------------------------------------------- */
         body { font-family: Arial, sans-serif; margin: 20px; background-color: #f4f4f9; }
         .container { max-width: 1200px; margin: auto; padding: 20px; background: #fff; border-radius: 8px; box-shadow: 0 4px 8px rgba(0,0,0,0.1); }
         h1 { color: #007bff; border-bottom: 2px solid #eee; padding-bottom: 10px; }
@@ -31,9 +34,11 @@
         #exportButton:disabled { background-color: #ccc; cursor: not-allowed; }
 
         #results { margin-top: 30px; }
+        /* 使用户提供的表格样式 */
         #results table { width: 100%; border-collapse: collapse; margin-top: 15px;}
         #results th, #results td { padding: 10px; text-align: left; border: 1px solid #ddd; font-size: 14px; }
         #results th { background-color: #007bff; color: white; }
+        
         .status-NXDOMAIN, .status-TIMEOUT, .status-ERROR { color: red; font-weight: bold; }
         .status-OK { color: green; font-weight: bold; }
         .loading { text-align: center; margin-top: 20px; font-size: 1.1em; color: #555; }
@@ -42,6 +47,7 @@
         #filterControls { background-color: #f9f9f9; padding: 15px; border-radius: 6px; border: 1px solid #eee; }
         .nav-link { margin-left: 15px; color: #007bff; text-decoration: none; font-weight: bold;}
         .status-message { margin-top: 15px; font-weight: bold; } 
+
     </style>
 </head>
 <body>
@@ -95,37 +101,227 @@
                     <option value="NXDOMAIN">域名不存在 (NXDOMAIN)</option>
                     <option value="TIMEOUT">超时 (TIMEOUT)</option>
                     <option value="ERROR">查询错误 (ERROR)</option>
-                </select>
+                    </select>
             </div>
         </div>
 
         <div id="loading" class="loading" style="display: none;">正在查询，请稍候...</div>
         <div id="results">
-            </div>
+        </div>
     </div>
 
     <script>
-        let LAST_QUERY_RESULTS = [];
         const DNS_SERVERS_KEY = 'lastUsedDnsServers';
+        let LAST_QUERY_RESULTS = []; // 存储后端返回的扁平化结果
 
-        document.addEventListener('DOMContentLoaded', () => {
-            const savedServers = localStorage.getItem(DNS_SERVERS_KEY);
-            const dnsServersInput = document.getElementById('dnsServers');
+        // --- 核心 AJAX 提交函数 (保留所有错误修复和逻辑) ---
+        function submitForm(url, payload, buttonId, statusMessageId, successCallback) {
+            const button = document.getElementById(buttonId);
+            const statusDiv = document.getElementById(statusMessageId);
+            const originalText = button.innerText;
+
+            statusDiv.style.display = 'block';
+            statusDiv.innerText = '正在发送请求...';
+            statusDiv.style.color = 'black';
             
-            if (savedServers) {
-                dnsServersInput.value = savedServers;
-            } else {
-                dnsServersInput.value = '8.8.8.8'; 
+            // 保护性检查按钮是否存在
+            if (button) {
+                button.disabled = true;
+                button.innerText = '处理中...';
             }
-            
-            // 绑定导出按钮事件
-            document.getElementById('exportButton').addEventListener('click', exportResults);
-        });
+
+            fetch(url, {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                },
+                body: JSON.stringify(payload),
+            })
+            .then(response => {
+                if (!response.ok) {
+                    return response.json().then(err => {
+                        throw new Error(`HTTP 错误 ${response.status}: ${err.message || '未知服务器错误'}`);
+                    }).catch(() => {
+                        throw new Error(`HTTP 错误 ${response.status}。`);
+                    });
+                }
+                return response.json();
+            })
+            .then(data => {
+                if (data.status === 'success') {
+                    statusDiv.innerText = data.message || `查询成功。`;
+                    statusDiv.style.color = 'green';
+                    successCallback(data); // 执行成功回调函数
+                } else {
+                    statusDiv.innerText = `服务器处理失败: ${data.message}`;
+                    statusDiv.style.color = 'red';
+                }
+                if (button) {
+                    button.disabled = false;
+                    button.innerText = originalText;
+                }
+            })
+            .catch(error => {
+                statusDiv.innerText = `网络或服务器连接失败: ${error.toString()}`;
+                statusDiv.style.color = 'red';
+                if (button) {
+                    button.disabled = false;
+                    button.innerText = originalText;
+                }
+                // 确保在网络错误时也能清除加载状态
+                document.getElementById('loading').style.display = 'none';
+            });
+        }
         
+        // --- 表格渲染函数 (使用 5 列结构以展示 CNAME 追溯结果) ---
+        function renderTable(results) {
+            const resultsDiv = document.getElementById('results');
+            const oldTable = document.getElementById('resultsTable');
+            if (oldTable) oldTable.remove();
+
+            if (results.length === 0) {
+                return; 
+            }
+
+            let html = `<table id="resultsTable">
+                            <thead>
+                                <tr>
+                                    <th>原始查询域名</th> 
+                                    <th>最终解析域名/CNAME</th> 
+                                    <th>DNS 服务器</th> 
+                                    <th>状态/类型</th>
+                                    <th>IP 地址/错误信息</th> 
+                                    <th>对应厂商</th>
+                                </tr>
+                            </thead>
+                            <tbody>`;
+            
+            results.forEach(record => {
+                const vendorDisplay = record.vendor || 'N/A'; 
+                // 提取状态码首部
+                const statusType = record.status ? record.status.split(':')[0].toUpperCase() : 'UNKNOWN';
+                const statusClass = `status-${statusType}`;
+                
+                html += `
+                    <tr>
+                        <td>${record.query_for}</td>               
+                        <td>${record.final_resolver_domain}</td>  
+                        <td>${record.dns_server}</td>             
+                        <td class="${statusClass}">${record.type} (${record.status})</td>
+                        <td>${record.value}</td>                   
+                        <td>${vendorDisplay}</td>
+                    </tr>
+                `;
+            });
+            
+            html += `</tbody></table>`;
+            
+            resultsDiv.innerHTML += html;
+        }
+
+        // --- 辅助函数：获取当前筛选结果 (修正逻辑) ---
+        function getFilteredResults() {
+            const filterDomain = document.getElementById('filterDomain').value.toLowerCase();
+            const filterVendor = document.getElementById('filterVendor').value.toLowerCase();
+            const filterStatus = document.getElementById('filterStatus').value.toUpperCase(); // 注意：用户提供的 select 默认 value=""
+
+            return LAST_QUERY_RESULTS.filter(record => {
+                // 1. 域名筛选：检查原始域名或最终解析域名
+                const queryFor = record.query_for ? record.query_for.toLowerCase() : '';
+                const finalDomain = record.final_resolver_domain ? record.final_resolver_domain.toLowerCase() : '';
+                
+                const domainMatch = record.query_for.toLowerCase().includes(filterDomain); // 🚨 修正：使用 record.query_for
+                
+                // 2. 厂商筛选
+                const vendorName = record.vendor ? record.vendor.toLowerCase() : '';
+                const vendorMatch = !filterVendor || vendorName.includes(filterVendor);
+
+                // 3. 状态筛选
+                const statusValue = record.status ? record.status.split(':')[0].toUpperCase() : '';
+                const statusMatch = !filterStatus || statusValue === filterStatus;
+                
+                return domainMatch && vendorMatch && statusMatch; 
+            });
+        }
+
+
+        // --- 核心筛选逻辑 (保留所有安全检查和逻辑) --- 
+        function applyFilters() {
+            const resultsDiv = document.getElementById('results');
+            const filteredResults = getFilteredResults();
+            const exportButton = document.getElementById('exportButton');
+
+            // 移除旧表格
+            document.getElementById('resultsTable')?.remove(); 
+            // 移除“没有匹配”的消息
+            document.getElementById('no-match-message')?.remove();
+
+            if (!LAST_QUERY_RESULTS || LAST_QUERY_RESULTS.length === 0) {
+                exportButton.disabled = true;
+                return;
+            }
+
+            // 启用/禁用导出按钮
+            exportButton.disabled = filteredResults.length === 0;
+
+            if (filteredResults.length === 0) {
+                const p = document.createElement('p');
+                p.id = 'no-match-message';
+                p.innerText = '当前筛选条件下没有匹配的结果。';
+                resultsDiv.appendChild(p);
+                return;
+            }
+
+            // --- 表格渲染开始 ---
+            let html = `<table id="resultsTable">
+                            <thead>
+                                <tr>
+                                    <th>原始查询域名</th> 
+                                    <th>最终解析域名/CNAME</th> 
+                                    <th>使用的 DNS 服务器</th> <th>状态/类型</th>
+                                    <th>IP 地址/错误信息</th> 
+                                    <th>对应厂商</th>
+                                </tr>
+                            </thead>
+                            <tbody>`;
+
+            // 遍历筛选后的结果并生成表格行
+            filteredResults.forEach(record => {
+                const vendorDisplay = record.vendor || 'N/A'; 
+                // 提取状态码首部
+                const statusType = record.status ? record.status.split(':')[0].toUpperCase() : 'UNKNOWN';
+                const statusClass = `status-${statusType}`;
+                
+                // 🚨 关键修正：确保每个单元格的数据源与表头严格对应
+                html += `
+                    <tr>
+                        <td>${record.query_for}</td>               
+                        <td>${record.final_resolver_domain}</td>  
+                        <td>${record.dns_server}</td>             
+                        <td class="${statusClass}">${record.type} (${record.status})</td>
+                        <td>${record.value}</td>                   
+                        <td>${vendorDisplay}</td>
+                    </tr>
+                `;
+            });
+
+            html += `</tbody></table>`;
+            
+            // 将表格添加到 results 区域 (注意：标题和耗时信息已在查询成功回调中设置)
+            resultsDiv.insertAdjacentHTML('beforeend', html);
+        }
+        // --- 核心筛选逻辑结束 ---
+
         // --- 导出功能的核心逻辑 ---
         function exportResults() {
             const resultsToExport = getFilteredResults(); // 获取当前筛选后的结果
             const exportButton = document.getElementById('exportButton');
+            
+            if (resultsToExport.length === 0) {
+                alert('没有可导出的数据。');
+                return;
+            }
+
             exportButton.disabled = true;
             const originalText = exportButton.innerText;
             exportButton.innerText = '正在生成...';
@@ -134,28 +330,44 @@
             fetch("{{ url_for('export_query_results') }}", {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ results: resultsToExport })
+                body: JSON.stringify({ results: resultsToExport }) 
             })
             .then(response => {
-                if (response.ok && response.headers.get('content-type').includes('text/csv')) {
-                    return response.blob();
-                } else {
-                    return response.json().then(data => {
-                        throw new Error(data.message || '导出失败，请检查服务器日志。');
+                // 🚨 关键修正 1：安全检查，先检查状态码
+                if (!response.ok) {
+                    // 如果不是 200 OK，尝试读取文本错误信息
+                    return response.text().then(text => {
+                        try {
+                            // 如果错误信息是 JSON 格式（例如 400 错误）
+                            const errorData = JSON.parse(text);
+                            throw new Error(errorData.message || `HTTP 错误 ${response.status}: 未知 API 错误`);
+                        } catch (e) {
+                            // 如果错误信息是普通文本或 HTML（例如 500 错误页）
+                            throw new Error(`HTTP 错误 ${response.status}: 服务器返回非 JSON 错误 (${text.substring(0, 100)}...)`);
+                        }
                     });
                 }
+                
+                // 关键修正 2：如果状态码是 OK，直接返回 Blob
+                return response.blob();
             })
             .then(blob => {
+                // 关键修正 3：执行下载操作
                 if (blob instanceof Blob) {
                     const url = window.URL.createObjectURL(blob);
                     const a = document.createElement('a');
                     a.style.display = 'none';
                     a.href = url;
-                    const filename = 'dns_query_results.csv';
+                    const filename = `dns_check_results_${new Date().toISOString().slice(0, 10)}.csv`;
                     a.download = filename;
                     document.body.appendChild(a);
                     a.click();
                     window.URL.revokeObjectURL(url);
+                    document.body.removeChild(a);
+                    alert(`文件 ${filename} 已开始下载。`);
+                } else {
+                     // 极少发生，但作为安全检查
+                    throw new Error('服务器未返回有效的文件数据。');
                 }
                 
                 exportButton.innerText = originalText;
@@ -164,6 +376,8 @@
             })
             .catch(error => {
                 alert(`导出失败: ${error.message}`);
+                
+                // 无论成功还是失败，都要还原按钮状态
                 exportButton.innerText = originalText;
                 exportButton.disabled = false;
             });
@@ -171,179 +385,60 @@
         // --- 结束: 导出功能的核心逻辑 ---
 
 
-        // --- 通用 Fetch 函数 ---
-        function submitForm(endpoint, payload, buttonId, statusDivId, successCallback) {
-            const button = document.getElementById(buttonId);
-            const statusDiv = document.getElementById(statusDivId);
-
-            if (!statusDiv) {
-                console.error(`Status Div with ID ${statusDivId} not found!`);
-                button.disabled = false;
-                button.innerText = (buttonId === 'queryButton') ? '执行实时查询' : '操作';
-                return;
-            }
-
-            statusDiv.innerHTML = '';
-            button.disabled = true;
-            button.innerText = '处理中...';
-
-            fetch(endpoint, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify(payload)
-            })
-            .then(response => response.json())
-            .then(data => {
-                button.disabled = false;
-                button.innerText = (buttonId === 'queryButton') ? '执行实时查询' : '添加厂商 IP';
-
-                if (data.status === 'success') {
-                    statusDiv.innerText = data.message || '操作成功。';
-                    statusDiv.style.color = 'green';
-                    if (successCallback) successCallback(data);
-                } else {
-                    statusDiv.innerText = `操作失败: ${data.message || '未知错误'}`;
-                    statusDiv.style.color = 'red';
-                }
-            })
-            .catch(error => {
-                button.disabled = false;
-                button.innerText = (buttonId === 'queryButton') ? '执行实时查询' : '添加厂商 IP';
-                statusDiv.innerText = `网络或服务器连接失败: ${error}`;
-                statusDiv.style.color = 'red';
-            });
-        }
-
-        // --- 辅助函数：获取当前筛选结果 ---
-        function getFilteredResults() {
-            const filterDomain = document.getElementById('filterDomain').value.toLowerCase();
-            const filterVendor = document.getElementById('filterVendor').value.toLowerCase();
-            const filterStatus = document.getElementById('filterStatus').value.toUpperCase();
-
-            return LAST_QUERY_RESULTS.filter(record => {
-                const domainMatch = record.domain.toLowerCase().includes(filterDomain);
-                const vendorMatch = (record.vendor || '').toLowerCase().includes(filterVendor);
-                
-                let statusText = record.status.split(':')[0].toUpperCase();
-                if (!['OK', 'NXDOMAIN', 'TIMEOUT'].includes(statusText)) {
-                     statusText = 'ERROR'; 
-                }
-                const statusMatch = !filterStatus || statusText === filterStatus;
-                
-                return domainMatch && vendorMatch && statusMatch;
-            });
-        }
-
-
-        // --- 核心筛选逻辑 (修复渲染逻辑) ---
-        function applyFilters() {
-            const resultsDiv = document.getElementById('results');
-            const filteredResults = getFilteredResults();
-            const exportButton = document.getElementById('exportButton');
-
-            if (LAST_QUERY_RESULTS.length === 0) {
-                resultsDiv.innerHTML = "<p>请先执行查询。</p>";
-                exportButton.disabled = true;
-                return;
-            }
-            
-            exportButton.disabled = filteredResults.length === 0;
-
-            const oldTable = document.getElementById('resultsTable');
-            const noMatchP = document.getElementById('no-match-message');
-
-            if (filteredResults.length === 0) {
-                 if (oldTable) oldTable.remove(); // 移除旧表格
-                 
-                 // 如果没有“没有匹配”的消息，则添加它
-                 if (!noMatchP) {
-                    const p = document.createElement('p');
-                    p.id = 'no-match-message';
-                    p.innerText = "没有匹配的记录。";
-                    resultsDiv.appendChild(p);
-                 }
-                 return;
-            }
-            
-            // 如果有匹配结果，移除“没有匹配的记录”消息
-            if (noMatchP) noMatchP.remove();
-
-            renderTable(filteredResults);
-        }
-
-        // 独立的表格渲染函数
-        function renderTable(results) {
-            const resultsDiv = document.getElementById('results');
-            const oldTable = document.getElementById('resultsTable');
-            if (oldTable) oldTable.remove();
-
-            if (results.length === 0) {
-                return; // 这种情况由 applyFilters 处理
-            }
-
-            let html = `<table id="resultsTable">
-                            <thead>
-                                <tr>
-                                    <th>域名</th>
-                                    <th>状态/类型</th>
-                                    <th>记录值/错误信息</th>
-                                    <th>对应厂商</th>
-                                </tr>
-                            </thead>
-                            <tbody>`;
-            
-            results.forEach(record => {
-                const statusClass = `status-${record.status.split(':')[0].toUpperCase()}`;
-                
-                html += `
-                    <tr>
-                        <td>${record.domain}</td>
-                        <td class="${statusClass}">${record.type} (${record.status})</td>
-                        <td>${record.value}</td>
-                        <td>${record.vendor || 'N/A'}</td>
-                    </tr>
-                `;
-            });
-            
-            html += `</tbody></table>`;
-            
-            // 将新表格追加到 resultsDiv 的末尾
-            resultsDiv.innerHTML += html;
-        }
-        
-        // --- 1. 实时查询逻辑 ---
-        document.getElementById('queryForm').addEventListener('submit', function(e) {
-            e.preventDefault();
-            
-            const domains = document.getElementById('domains').value;
+        document.addEventListener('DOMContentLoaded', function() {
             const dnsServersInput = document.getElementById('dnsServers');
-            const dnsServers = dnsServersInput.value;
+            const savedServers = localStorage.getItem(DNS_SERVERS_KEY);
             const loadingDiv = document.getElementById('loading');
             
-            localStorage.setItem(DNS_SERVERS_KEY, dnsServers);
-            
-            loadingDiv.style.display = 'block';
-            document.getElementById('results').innerHTML = ''; // 清空结果
-            document.getElementById('exportButton').disabled = true; // 禁用导出
+            if (savedServers) {
+                // 将保存的 DNS 服务器 IP 填回 textarea
+                dnsServersInput.value = savedServers.split(',').join('\n'); 
+            } else {
+                dnsServersInput.value = '8.8.8.8'; 
+            }
 
-            const payload = { domains: domains, dns_servers: dnsServers };
-
-            submitForm('/query', payload, 'queryButton', 'queryStatusMessage', (data) => {
-                loadingDiv.style.display = 'none';
+            // --- 1. 实时查询逻辑 ---
+            document.getElementById('queryForm').addEventListener('submit', function(e) {
+                e.preventDefault();
                 
-                LAST_QUERY_RESULTS = data.results; 
-                // 设置查询结果的容器内容，包括标题和耗时
-                document.getElementById('results').innerHTML = `<h2>查询结果 (${data.results.length} 条记录)</h2>
-                                                               <p>总耗时: ${data.time_taken}</p>`;
-                applyFilters(); // 自动应用筛选并渲染表格，启用导出按钮
+                const domains = document.getElementById('domains').value;
+                const dnsServers = dnsServersInput.value;
+                const exportButton = document.getElementById('exportButton');
+
+                // 将 textarea 中的多行 IP 转换为逗号分隔的字符串并保存
+                const dnsServersComma = dnsServers.split('\n').map(s => s.trim()).filter(s => s.length > 0).join(',');
+                localStorage.setItem(DNS_SERVERS_KEY, dnsServersComma);
+                
+                loadingDiv.style.display = 'block';
+                document.getElementById('results').innerHTML = ''; // 清空结果
+                
+                // 保护性禁用导出按钮
+                if (exportButton) { 
+                    exportButton.disabled = true; 
+                }
+
+                const payload = { domains: domains, dns_servers: dnsServersComma };
+
+                submitForm('/query', payload, 'queryButton', 'queryStatusMessage', (data) => {
+                    loadingDiv.style.display = 'none';
+                    
+                    LAST_QUERY_RESULTS = data.results; 
+                    // 设置查询结果的容器内容，包括标题和耗时
+                    document.getElementById('results').innerHTML = `<h2>查询结果 (${data.results.length} 条记录)</h2>
+                                                                   <p>总耗时: ${data.time_taken}</p>`;
+                    applyFilters(); // 自动应用筛选并渲染表格，启用导出按钮
+                });
             });
+
+
+            // --- 2. 导出按钮事件绑定 ---
+            document.getElementById('exportButton').addEventListener('click', exportResults);
+
+            // --- 3. 筛选器事件绑定 ---
+            document.getElementById('filterDomain').addEventListener('input', applyFilters);
+            document.getElementById('filterVendor').addEventListener('input', applyFilters);
+            document.getElementById('filterStatus').addEventListener('change', applyFilters);
         });
-
-
-        // --- 筛选器事件绑定 (保持不变) ---
-        document.getElementById('filterDomain').addEventListener('input', applyFilters);
-        document.getElementById('filterVendor').addEventListener('input', applyFilters);
-        document.getElementById('filterStatus').addEventListener('change', applyFilters);
     </script>
 </body>
 </html>

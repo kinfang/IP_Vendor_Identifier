@@ -11,6 +11,7 @@ import sys
 from functools import wraps
 import csv
 from io import StringIO # 用于在内存中创建 CSV 文件
+import concurrent.futures # 🚨 新增：用于并行查询
 
 # ====================================================================
 #                   !!! 安全配置区 !!!
@@ -191,32 +192,103 @@ def lookup_vendor(ip_address_str):
       return "查询异常"
 
 def resolve_domain_with_custom_dns(domain, custom_servers):
-   resolver = dns.resolver.Resolver()
-   resolver.nameservers = custom_servers
-   resolver.timeout = 5.0
-   resolver.lifetime = 5.0
-   results = []
-   
-   try:
-      answers = resolver.resolve(domain, 'A')
-      for rdata in answers:
-         ip_str = rdata.address
-         vendor = lookup_vendor(ip_str)
-         results.append({
-            'domain': domain,
-            'type': 'A',
-            'value': ip_str,
-            'vendor': vendor,
-            'status': 'OK'
-         })
-   except dns.resolver.NXDOMAIN:
-      results.append({'domain': domain, 'type': 'A', 'value': 'N/A', 'vendor': 'N/A', 'status': 'NXDOMAIN'})
-   except dns.exception.Timeout:
-      results.append({'domain': domain, 'type': 'A', 'value': 'N/A', 'vendor': 'N/A', 'status': 'TIMEOUT'})
-   except Exception as e:
-      results.append({'domain': domain, 'type': 'A', 'value': 'N/A', 'vendor': 'N/A', 'status': f'ERROR: {e}'})
-      
-   return results
+    """
+    使用自定义 DNS 服务器解析域名，支持 CNAME 追溯直到获取 A 记录。
+    返回结果是一个包含所有解析记录（A 和 CNAME）的列表。
+    """
+    resolver = dns.resolver.Resolver()
+    resolver.nameservers = custom_servers
+    resolver.timeout = 5.0
+    resolver.lifetime = 5.0
+    
+    results = []
+    target_domain = domain # 初始查询目标
+    max_cname_depth = 8    
+    current_depth = 0
+    
+    try:
+        while target_domain and current_depth <= max_cname_depth:
+            current_depth += 1
+
+            # ----------------------------------------------
+            # 🚨 关键修改：优先尝试解析 CNAME 记录
+            # ----------------------------------------------
+            is_cname_found = False
+            
+            try:
+                # 尝试解析 CNAME 记录
+                cname_answers = resolver.resolve(target_domain, 'CNAME')
+                cname_record = str(cname_answers[0].target)
+                
+                # 去除末尾的点
+                if cname_record.endswith('.'):
+                    cname_record = cname_record[:-1]
+                    
+                results.append({
+                    'domain': target_domain,
+                    'type': 'CNAME',
+                    'value': cname_record,
+                    'vendor': 'N/A',
+                    'status': 'OK',
+                    'query_for': domain 
+                })
+                
+                # 设置下一个查询目标为 CNAME 的目标
+                target_domain = cname_record
+                is_cname_found = True
+                
+            except dns.resolver.NoAnswer:
+                # 如果没有 CNAME 记录，则继续尝试 A 记录
+                pass 
+                
+            if is_cname_found:
+                continue # 如果找到了 CNAME，继续下一轮循环追溯 CNAME 目标
+
+            # ----------------------------------------------
+            # 尝试解析 A 记录 (仅在未找到 CNAME 时执行)
+            # ----------------------------------------------
+            try:
+                a_answers = resolver.resolve(target_domain, 'A')
+                
+                for rdata in a_answers:
+                    ip_str = rdata.address
+                    vendor = lookup_vendor(ip_str)
+                    results.append({
+                        'domain': target_domain,
+                        'type': 'A',
+                        'value': ip_str,
+                        'vendor': vendor,
+                        'status': 'OK',
+                        'query_for': domain 
+                    })
+                # 如果成功解析到 A 记录，则停止追溯
+                target_domain = None
+                break
+                
+            except dns.resolver.NoAnswer:
+                # 既没有 A 记录也没有 CNAME 记录
+                if current_depth == 1:
+                    results.append({'domain': domain, 'type': 'A/CNAME', 'value': 'N/A', 'vendor': 'N/A', 'status': 'NoAnswer', 'query_for': domain})
+                elif current_depth > 1:
+                    results.append({'domain': target_domain, 'type': 'A/CNAME', 'value': 'N/A', 'vendor': 'N/A', 'status': 'CNAME_NoAnswer', 'query_for': domain})
+                target_domain = None
+                break
+                    
+        if current_depth > max_cname_depth:
+            results.append({'domain': domain, 'type': 'A/CNAME', 'value': 'N/A', 'vendor': 'N/A', 'status': 'CNAMERecursionLimit', 'query_for': domain})
+            
+    except dns.resolver.NXDOMAIN:
+        # ... (错误处理部分保持不变) ...
+        results.append({'domain': target_domain or domain, 'type': 'A/CNAME', 'value': 'N/A', 'vendor': 'N/A', 'status': 'NXDOMAIN', 'query_for': domain})
+    except dns.exception.Timeout:
+        results.append({'domain': target_domain or domain, 'type': 'A/CNAME', 'value': 'N/A', 'vendor': 'N/A', 'status': 'TIMEOUT', 'query_for': domain})
+    except Exception as e:
+        results.append({'domain': target_domain or domain, 'type': 'A/CNAME', 'value': 'N/A', 'vendor': 'N/A', 'status': f'ERROR: {e}', 'query_for': domain})
+        
+    if not results:
+        results.append({'domain': domain, 'type': 'A/CNAME', 'value': 'N/A', 'vendor': 'N/A', 'status': 'UnknownError', 'query_for': domain})
+        
+    return results
 
 # ====================================================================
 #                   认证和视图路由
@@ -377,44 +449,142 @@ def update_vendor(vendor_id):
 
 # ----------------- 保持原有 API -----------------
 
-@APP.route('/query', methods=['POST'])
+@APP.route('/query', methods=['GET', 'POST']) 
 @login_required 
-def handle_query():
-   # 核心修复点：在每次查询开始时，检查并同步当前 Worker 的缓存
-   check_and_reload_cache()
-   
-   data = request.json
-   
-   domains_input = data.get('domains', '')
-   dns_input = data.get('dns_servers', '')
-   
-   domains = [d.strip() for d in domains_input.split('\n') if d.strip()]
-   
-   # 过滤掉以 '#' 开头（忽略前后空格）的行
-   custom_servers = [
-       ip.strip() 
-       for ip in dns_input.split('\n') 
-       if ip.strip() and not ip.strip().startswith('#')
-   ]
-
-   if not custom_servers:
-      return jsonify({'error': '请至少提供一个 DNS 服务器 IP 地址（非注释行）。'}), 400
-   if not domains:
-      return jsonify({'error': '请提供域名列表。'}), 400
-
-   all_results = []
+def query_domains():
+   """
+   处理域名查询请求，使用所有自定义 DNS 服务器并行解析。
+   """
+   if request.method == 'GET':
+     return render_template('query_form.html')
+        
    start_time = time.time()
+   data = request.json
+   domains = data.get('domains', '')
+   dns_servers_str = data.get('dns_servers', '') 
    
-   for domain in domains:
-      results = resolve_domain_with_custom_dns(domain, custom_servers)
-      all_results.extend(results)
+   # 🚨 修正后的 DNS 服务器解析逻辑（与上一个回复中的最终版本一致）
+   dns_servers = []
+   ip_candidates = dns_servers_str.split(',')
+
+   for candidate in ip_candidates:
+      candidate = candidate.strip()
+      if not candidate:
+         continue
+      
+      comment_index = candidate.find('#')
+      
+      if comment_index == 0:
+         continue 
+      elif comment_index > 0:
+         ip = candidate[:comment_index].strip() 
+      else:
+         ip = candidate 
+      
+      if ip:
+         dns_servers.append(ip)
+
+   if not dns_servers:
+      dns_servers = ['8.8.8.8']
    
+   # 1. 检查并加载缓存
+   check_and_reload_cache() 
+   
+   domain_list = [d.strip() for d in domains.split('\n') if d.strip()]
+   all_query_tasks = [] # 存储所有 (域名, DNS服务器) 组合
+
+   # 🚨 核心逻辑修改：创建所有查询任务
+   for domain in domain_list:
+      for server in dns_servers:
+         all_query_tasks.append((domain, [server])) # 注意：resolve_domain_with_custom_dns 接受列表
+
+   # 用于存储所有结果 (来自所有 DNS 服务器)
+   all_simplified_results = [] 
+
+   def execute_query(task):
+      """线程池执行函数：解析单个域名，使用单个 DNS 服务器"""
+      domain, server_list = task
+      # server_list 只有一个元素，即当前的 DNS 服务器 IP
+      current_server_ip = server_list[0] 
+      
+      # 1. 执行 DNS 解析，获取解析链
+      chain_results = resolve_domain_with_custom_dns(domain, server_list)
+      
+      # 2. 扁平化/简化逻辑 (与原有逻辑一致)
+      ip_records = [r for r in chain_results if r['type'] == 'A']
+      
+      final_resolver_domain = 'N/A'
+      
+      if ip_records:
+         final_resolver_domain = ip_records[0]['domain']
+      else:
+         final_resolver_domain = chain_results[0]['domain']
+      
+      simplified_group = [] # 存储该 (域名, DNS服务器) 组合产生的所有 A 记录
+      
+      if ip_records:
+         # 针对每个 IP 地址，创建一条简化记录
+         for ip_record in ip_records:
+            simplified_group.append({
+               'query_for': domain,                                 
+               'final_resolver_domain': final_resolver_domain,      
+               'type': ip_record['type'],                           
+               'value': ip_record['value'],                         
+               'vendor': ip_record['vendor'],
+               'status': ip_record['status'],
+               'chain': chain_results,                              
+               'dns_server': current_server_ip # 🚨 将当前使用的 DNS 服务器加入结果
+            })
+      else:
+         # 无法解析到 IP，报告错误 (使用第一条记录的错误信息)
+         error_record = chain_results[0] 
+         simplified_group.append({
+            'query_for': domain,
+            'final_resolver_domain': final_resolver_domain, 
+            'type': error_record['type'],
+            'value': error_record['value'],
+            'vendor': 'N/A',
+            'status': error_record['status'],
+            'chain': chain_results,
+            'dns_server': current_server_ip # 🚨 将当前使用的 DNS 服务器加入结果
+         })
+         
+      return simplified_group
+
+   # 🚨 3. 使用线程池并行执行所有任务
+   # 线程数设置为 10 或 (任务总数 + 1)，以避免创建过多线程
+   max_workers = min(20, len(all_query_tasks) if all_query_tasks else 1) 
+   with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+      # executor.map 会保留任务的顺序，但我们在这里并不需要，所以直接处理 results
+      future_to_task = {executor.submit(execute_query, task): task for task in all_query_tasks}
+      
+      for future in concurrent.futures.as_completed(future_to_task):
+         try:
+            # future.result() 返回的是 execute_query 的结果 (simplified_group)
+            result_list = future.result() 
+            all_simplified_results.extend(result_list)
+         except Exception as exc:
+            domain, server_list = future_to_task[future]
+            print(f"❌ 域名 {domain} (DNS: {server_list[0]}) 生成异常: {exc}", file=sys.stderr)
+            # 报告内部错误，避免丢失任务
+            all_simplified_results.append({
+                'query_for': domain,
+                'final_resolver_domain': 'N/A',
+                'type': 'Internal Error',
+                'value': str(exc),
+                'vendor': 'N/A',
+                'status': 'FATAL_ERROR',
+                'chain': [],
+                'dns_server': server_list[0]
+            })
+
    end_time = time.time()
    
+   # 4. 返回所有结果
    return jsonify({
       'status': 'success',
-      'time_taken': f"{(end_time - start_time):.3f} 秒",
-      'results': all_results
+      'results': all_simplified_results, # 🚨 返回包含所有 DNS 服务器结果的列表
+      'time_taken': f"{end_time - start_time:.3f} s"
    })
 
 
@@ -431,8 +601,17 @@ def export_query_results():
             return jsonify({'status': 'error', 'message': '没有查询结果可以导出。'}), 400
 
         # 定义 CSV 头部和字段
-        fieldnames = ['domain', 'type', 'value', 'vendor', 'status']
+        # 🚨 关键修改：新增 'query_for' 字段
+        fieldnames = ['query_for', 'final_resolver_domain', 'dns_server', 'type', 'value', 'vendor', 'status']
         
+        # 🚨 【修正开始】: 移除结果中的 'chain' 字段
+        cleaned_results = []
+        for result in results:
+           # 移除 'chain' 字段，DictWriter 要求字典的键必须在 fieldnames 中
+           result.pop('chain', None) 
+           cleaned_results.append(result)
+        # 🚨 【修正结束】
+
         # 使用 StringIO 在内存中构建 CSV 文件
         output = StringIO()
         writer = csv.DictWriter(output, fieldnames=fieldnames)
@@ -441,7 +620,7 @@ def export_query_results():
         writer.writeheader()
         
         # 写入数据行
-        writer.writerows(results)
+        writer.writerows(cleaned_results) # 🚨 替换为使用清理后的 cleaned_results 列表
         
         csv_output = output.getvalue()
         
